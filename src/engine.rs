@@ -13,6 +13,7 @@ use crate::error::Error;
 use crate::mem;
 use crate::models::{self, Backend, Scale, TileSize};
 use crate::pdf::{self, PageKind};
+use crate::thermal;
 use crate::waifu2x::{self, OrtEngine, UpscaleSettings};
 
 const MAX_RETRY: u32 = 8;
@@ -77,6 +78,7 @@ pub enum Event {
         err: String,
         requeued: bool,
     },
+    Thermal { celsius: f32, paused: bool },
     Finished { error: Option<String> },
 }
 
@@ -301,6 +303,30 @@ async fn worker(
             return;
         }
 
+        {
+            let stop_t = stop.clone();
+            let ev_t = ev.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                thermal::pause_if_hot(&stop_t, |msg, chip| {
+                    if let Some(c) = chip {
+                        let _ = ev_t.send(Event::Thermal {
+                            celsius: c.celsius,
+                            paused: c.paused,
+                        });
+                    }
+                    if !msg.is_empty() {
+                        let _ = ev_t.send(Event::Status(msg));
+                    }
+                });
+            })
+            .await;
+        }
+        if stop.load(Ordering::SeqCst) {
+            let mut q = queue.lock().await;
+            q.push_front(item);
+            return;
+        }
+
         let _ = ev.send(Event::PageStart { id: item.job.id });
         let load = item.job.clone();
         let rgb = match tokio::task::spawn_blocking(move || load_rgb(&load)).await {
@@ -369,9 +395,23 @@ async fn worker(
         let id = item.job.id;
         let out_path = item.job.out_path.clone();
         let binarize = settings.binarize;
+        let stop_up = stop.clone();
         let result = tokio::task::spawn_blocking(move || {
             let img = waifu2x::upscale(&rgb, &engine2, &up, |done, total| {
                 let _ = ev2.send(Event::Tile { id, done, total });
+                if done == 0 || done == total || done % 8 == 0 {
+                    thermal::pause_if_hot(&stop_up, |msg, chip| {
+                        if let Some(c) = chip {
+                            let _ = ev2.send(Event::Thermal {
+                                celsius: c.celsius,
+                                paused: c.paused,
+                            });
+                        }
+                        if !msg.is_empty() {
+                            let _ = ev2.send(Event::Status(msg));
+                        }
+                    });
+                }
             })?;
             drop(rgb);
             if let Some(parent) = out_path.parent() {

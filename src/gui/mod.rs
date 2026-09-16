@@ -21,6 +21,7 @@ pub(crate) use crate::text_input::TextInput;
 use crate::config;
 use crate::engine::{self, Handle as EngineHandle, PageJob, RunSettings};
 use crate::keys::{bind_primary, with_mod};
+use crate::media;
 use crate::mem::fmt_bytes;
 use crate::models::{
     noise_label, AlphaMode, Backend, ModelId, Scale, TileSize, TtaLevel, NOISE_LEVELS,
@@ -48,6 +49,7 @@ pub(crate) struct QueuePage {
     pub id: u64,
     pub label: String,
     pub source: engine::JobSource,
+    pub rel: PathBuf,
     pub kind: PageKind,
     pub status: PageStatus,
     pub tiles_done: usize,
@@ -64,6 +66,7 @@ struct SettingsUi {
     tta: TtaLevel,
     alpha: AlphaMode,
     binarize: bool,
+    overwrite: bool,
 }
 
 pub(crate) struct RepairApp {
@@ -85,6 +88,8 @@ pub(crate) struct RepairApp {
     mem_process: u64,
     mem_avail: u64,
     mem_budget: u64,
+    chip_c: Option<f32>,
+    thermal_paused: bool,
     btn_press: Option<SharedString>,
 }
 
@@ -119,6 +124,7 @@ impl RepairApp {
                 tta: cfg.tta,
                 alpha: cfg.alpha,
                 binarize: cfg.binarize,
+                overwrite: cfg.overwrite,
             },
             out_dir,
             status: "拖入或打开 PDF / 图片.".into(),
@@ -129,6 +135,8 @@ impl RepairApp {
             mem_process: 0,
             mem_avail: 0,
             mem_budget: 0,
+            chip_c: None,
+            thermal_paused: false,
             btn_press: None,
         }
     }
@@ -144,6 +152,7 @@ impl RepairApp {
         cfg.tta = self.settings.tta;
         cfg.alpha = self.settings.alpha;
         cfg.binarize = self.settings.binarize;
+        cfg.overwrite = self.settings.overwrite;
         cfg.out_dir = self.out_dir.display().to_string();
         config::save(&cfg);
     }
@@ -259,17 +268,32 @@ impl RepairApp {
         if self.running {
             return;
         }
+        let overwrite = self.settings.overwrite;
+        let out_dir = self.out_dir.clone();
         let jobs: Vec<PageJob> = self
             .pages
             .iter()
             .filter(|p| matches!(p.status, PageStatus::Queued | PageStatus::Failed(_)))
             .map(|p| {
-                let stem = sanitize(&p.label);
+                let source_file = match &p.source {
+                    engine::JobSource::Image(path) => path.clone(),
+                    engine::JobSource::Pdf { path, .. } => path.clone(),
+                };
+                let pdf_page = match &p.source {
+                    engine::JobSource::Pdf { page, .. } => Some(*page),
+                    engine::JobSource::Image(_) => None,
+                };
                 PageJob {
                     id: p.id,
                     label: p.label.clone(),
                     source: p.source.clone(),
-                    out_path: self.out_dir.join(format!("{stem}_waifu2x.png")),
+                    out_path: media::job_out_path(
+                        overwrite,
+                        &out_dir,
+                        &source_file,
+                        &p.rel,
+                        pdf_page,
+                    ),
                 }
             })
             .collect();
@@ -365,6 +389,10 @@ impl RepairApp {
                     }
                 }
             }
+            engine::Event::Thermal { celsius, paused } => {
+                self.chip_c = Some(celsius);
+                self.thermal_paused = paused;
+            }
             engine::Event::Finished { error } => {
                 self.running = false;
                 self.engine = None;
@@ -445,35 +473,12 @@ impl RepairApp {
     }
 }
 
-fn sanitize(s: &str) -> String {
-    let t: String = s
-        .chars()
-        .map(|c| if r#"\/:*?"<>|"#.contains(c) { '_' } else { c })
-        .collect();
-    if t.is_empty() {
-        "page".into()
-    } else {
-        t
-    }
-}
-
 pub fn is_pdf_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("pdf"))
-        .unwrap_or(false)
+    crate::media::is_pdf_path(path)
 }
 
 pub fn is_image_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| {
-            matches!(
-                e.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "tif" | "tiff" | "bmp" | "webp"
-            )
-        })
-        .unwrap_or(false)
+    crate::media::is_image_path(path)
 }
 
 impl Focusable for RepairApp {
@@ -544,7 +549,11 @@ impl Render for RepairApp {
                             .flex_1()
                             .text_xs()
                             .text_color(rgb(0x64748b))
-                            .child(self.out_dir.display().to_string()),
+                            .child(if self.settings.overwrite {
+                                "覆盖: 写回原目录同名 .png".to_string()
+                            } else {
+                                self.out_dir.display().to_string()
+                            }),
                     )
                     .child(self.btn(
                         "start",

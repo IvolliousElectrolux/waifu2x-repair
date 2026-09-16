@@ -7,12 +7,14 @@ mod engine;
 mod error;
 mod gui;
 mod keys;
+mod media;
 mod mem;
 mod models;
 mod pdf;
 mod seam;
 mod tensor;
 mod text_input;
+mod thermal;
 mod waifu2x;
 
 pub(crate) use keys::bind_primary;

@@ -32,6 +32,8 @@ pub struct Config {
     #[serde(default)]
     pub binarize: bool,
     #[serde(default)]
+    pub overwrite: bool,
+    #[serde(default)]
     pub out_dir: String,
 }
 
@@ -60,6 +62,7 @@ impl Default for Config {
             tta: TtaLevel::Off,
             alpha: AlphaMode::Auto,
             binarize: false,
+            overwrite: false,
             out_dir: String::new(),
         }
     }

@@ -13,13 +13,19 @@ pub(super) enum ImportItem {
     Pdf {
         info: PdfInspect,
         page_input: Entity<TextInput>,
+        rel: PathBuf,
     },
     PdfPending {
         path: PathBuf,
         name: String,
         page_input: Entity<TextInput>,
+        rel: PathBuf,
     },
-    Image { path: PathBuf, name: String },
+    Image {
+        path: PathBuf,
+        name: String,
+        rel: PathBuf,
+    },
 }
 
 impl ImportItem {
@@ -32,7 +38,7 @@ impl ImportItem {
     fn name(&self) -> &str {
         match self {
             Self::Pdf { info, .. } => info.name.as_str(),
-            Self::PdfPending { name, .. } | Self::Image { path: _, name } => name.as_str(),
+            Self::PdfPending { name, .. } | Self::Image { name, .. } => name.as_str(),
         }
     }
     fn as_pdf(&self) -> Option<&PdfInspect> {
@@ -78,6 +84,8 @@ pub(super) struct PdfImportState {
     pub scale: f32,
     pub inspect_gen: u64,
     pub inspect_inflight: u32,
+    scanning: bool,
+    walk_gen: u64,
     active: Option<usize>,
     preview_page: u32,
     pub(super) preview_image: Option<Arc<RenderImage>>,
@@ -102,6 +110,8 @@ impl PdfImportState {
             scale: clamp_pdf_scale(scale),
             inspect_gen: 0,
             inspect_inflight: 0,
+            scanning: false,
+            walk_gen: 0,
             active: None,
             preview_page: 1,
             preview_image: None,
@@ -239,13 +249,6 @@ impl PdfImportState {
     }
 }
 
-fn item_file_name(path: &PathBuf) -> String {
-    path.file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file")
-        .to_string()
-}
-
 fn fmt_pt(v: f32) -> String {
     if (v - v.round()).abs() < 0.05 {
         format!("{}", v.round() as i32)
@@ -310,6 +313,7 @@ impl RepairApp {
         if let Some(st) = self.pdf_import.as_mut() {
             st.inspect_gen = st.inspect_gen.wrapping_add(1);
             st.preview_gen = st.preview_gen.wrapping_add(1);
+            st.walk_gen = st.walk_gen.wrapping_add(1);
         }
         self.pdf_import = None;
         cx.notify();
@@ -468,27 +472,91 @@ impl RepairApp {
 
     pub(super) fn import_dialog_add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.open_import_dialog(cx);
+        if paths.is_empty() {
+            return;
+        }
+        let need_walk = paths.iter().any(|p| p.is_dir());
+        if !need_walk {
+            match crate::media::expand_paths(&paths) {
+                Ok(found) => self.add_found_files(found, cx),
+                Err(e) => {
+                    if let Some(st) = self.pdf_import.as_mut() {
+                        st.error = Some(e);
+                    }
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        let Some(st) = self.pdf_import.as_mut() else {
+            return;
+        };
+        st.scanning = true;
+        st.error = None;
+        st.walk_gen = st.walk_gen.wrapping_add(1);
+        let gen = st.walk_gen;
+        cx.notify();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(crate::media::expand_paths(&paths));
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(res) = rx.recv().await {
+                this.update(cx, |view, cx| {
+                    let Some(st) = view.pdf_import.as_mut() else {
+                        return;
+                    };
+                    if st.walk_gen != gen {
+                        return;
+                    }
+                    st.scanning = false;
+                    match res {
+                        Ok(found) => {
+                            if found.is_empty() {
+                                st.error = Some("文件夹里没有图片或 PDF".into());
+                                cx.notify();
+                            } else {
+                                view.add_found_files(found, cx);
+                            }
+                        }
+                        Err(e) => {
+                            st.error = Some(e);
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn add_found_files(&mut self, found: Vec<crate::media::FoundFile>, cx: &mut Context<Self>) {
         let Some(st) = self.pdf_import.as_mut() else {
             return;
         };
         let mut pdfs = Vec::new();
         let start_len = st.items.len();
-        for p in paths {
-            if st.contains_path(&p) || pdfs.contains(&p) {
+        for f in found {
+            if st.contains_path(&f.path) || pdfs.iter().any(|p: &PathBuf| p == &f.path) {
                 continue;
             }
-            if is_pdf_path(&p) {
-                let name = item_file_name(&p);
+            let name = crate::media::rel_display(&f.rel);
+            if is_pdf_path(&f.path) {
                 let page_input = cx.new(|cx| TextInput::new(cx, "", "如 1, 3-7").with_compact(true));
                 st.items.push(ImportItem::PdfPending {
-                    path: p.clone(),
+                    path: f.path.clone(),
                     name,
                     page_input,
+                    rel: f.rel,
                 });
-                pdfs.push(p);
-            } else if is_image_path(&p) {
-                let name = item_file_name(&p);
-                st.items.push(ImportItem::Image { path: p, name });
+                pdfs.push(f.path);
+            } else if is_image_path(&f.path) {
+                st.items.push(ImportItem::Image {
+                    path: f.path,
+                    name,
+                    rel: f.rel,
+                });
             }
         }
         if st.active.is_none() && st.items.len() > start_len {
@@ -538,12 +606,20 @@ impl RepairApp {
                                 if let Some(slot) = st.items.iter_mut().find(|i| {
                                     matches!(i, ImportItem::PdfPending { path: p, .. } if *p == path)
                                 }) {
-                                    let page_input = match slot {
-                                        ImportItem::PdfPending { page_input, .. }
-                                        | ImportItem::Pdf { page_input, .. } => page_input.clone(),
+                                    let (page_input, rel) = match slot {
+                                        ImportItem::PdfPending {
+                                            page_input, rel, ..
+                                        }
+                                        | ImportItem::Pdf {
+                                            page_input, rel, ..
+                                        } => (page_input.clone(), rel.clone()),
                                         ImportItem::Image { .. } => unreachable!(),
                                     };
-                                    *slot = ImportItem::Pdf { info, page_input };
+                                    *slot = ImportItem::Pdf {
+                                        info,
+                                        page_input,
+                                        rel,
+                                    };
                                 }
                                 st.error = None;
                                 first
@@ -570,6 +646,22 @@ impl RepairApp {
             }
         })
         .detach();
+    }
+
+    pub(super) fn import_dialog_pick_folders(&mut self, cx: &mut Context<Self>) {
+        Self::spawn_native_dialog(
+            cx,
+            || {
+                rfd::FileDialog::new()
+                    .set_title("打开文件夹 (递归导入图片 / PDF)")
+                    .pick_folders()
+            },
+            |this, folders, cx| {
+                if let Some(paths) = folders {
+                    this.import_dialog_add_paths(paths, cx);
+                }
+            },
+        );
     }
 
     pub(super) fn import_dialog_pick_files(&mut self, cx: &mut Context<Self>) {
@@ -684,7 +776,11 @@ impl RepairApp {
         let mut next_id = self.next_page_id;
         for item in &st.items {
             match item {
-                ImportItem::Pdf { info, page_input } => {
+                ImportItem::Pdf {
+                    info,
+                    page_input,
+                    rel,
+                } => {
                     let txt = page_input.read(cx).text();
                     let sel = parse_page_selection(&txt, info.page_count);
                     if !txt.trim().is_empty() && sel.is_empty() {
@@ -723,6 +819,7 @@ impl RepairApp {
                                 scale_x: sx,
                                 scale_y: sy,
                             },
+                            rel: rel.clone(),
                             kind: info_p.kind,
                             status: if info_p.kind == PageKind::Vector {
                                 PageStatus::Skipped("纯矢量, 无需修复".into())
@@ -735,11 +832,12 @@ impl RepairApp {
                         next_id += 1;
                     }
                 }
-                ImportItem::Image { path, name } => {
+                ImportItem::Image { path, name, rel } => {
                     pages.push(QueuePage {
                         id: next_id,
                         label: name.clone(),
                         source: engine::JobSource::Image(path.clone()),
+                        rel: rel.clone(),
                         kind: PageKind::Image,
                         status: PageStatus::Queued,
                         tiles_done: 0,
@@ -788,7 +886,7 @@ impl RepairApp {
         let has_pdf = st.has_pdf();
         let needs_raster = st.needs_raster();
         let n_items = st.items.len();
-        let loading = st.loading;
+        let loading = st.loading || st.scanning;
         let lock = st.lock_aspect;
         let can_import = !loading && !st.items.is_empty() && !st.has_pending_pdf();
         let w_input = self.pdf_w_input.clone();
@@ -835,12 +933,14 @@ impl RepairApp {
             .collect();
         let err = st.error.clone();
         let entity = cx.entity();
-        let drop_hint: SharedString = if loading {
+        let drop_hint: SharedString = if st.scanning {
+            "正在扫描文件夹…".into()
+        } else if st.loading {
             "正在读取 PDF…".into()
         } else if n_items > 0 {
-            "点击或拖入以添加更多".into()
+            "点击或拖入以添加更多文件 / 文件夹".into()
         } else {
-            "请拖入文件".into()
+            "请拖入文件或文件夹".into()
         };
 
         let mut list = div()
@@ -1218,6 +1318,9 @@ impl RepairApp {
                             .flex_row()
                             .gap_2()
                             .justify_end()
+                            .child(self.btn("pdf_import_folder", "文件夹", false, |this, _, cx| {
+                                this.import_dialog_pick_folders(cx)
+                            }, cx))
                             .child(self.btn("pdf_import_cancel", "取消", false, |this, _, cx| {
                                 this.close_import_dialog(cx)
                             }, cx))

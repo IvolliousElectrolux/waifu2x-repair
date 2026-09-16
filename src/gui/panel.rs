@@ -233,6 +233,52 @@ impl RepairApp {
             )
             .child(
                 div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_xs().text_color(rgb(0x334155)).child("输出位置"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap_1()
+                            .child(self.chip(
+                                "out-overwrite".into(),
+                                "覆盖原文件".into(),
+                                self.settings.overwrite,
+                                running,
+                                |this, cx| {
+                                    this.settings.overwrite = true;
+                                    this.persist(cx);
+                                },
+                                cx,
+                            ))
+                            .child(self.chip(
+                                "out-newdir".into(),
+                                "新目录".into(),
+                                !self.settings.overwrite,
+                                running,
+                                |this, cx| {
+                                    this.settings.overwrite = false;
+                                    this.persist(cx);
+                                },
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x64748b))
+                            .child(if self.settings.overwrite {
+                                "写回原目录同名 .png (jpg/tif 会在旁边生成 png, 不删原文件). PDF 写成 文件名_p001.png"
+                            } else {
+                                "按拖入文件夹的相对路径镜像到输出目录, 文件名加 _waifu2x"
+                            }),
+                    ),
+            )
+            .child(
+                div()
                     .mt_2()
                     .text_xs()
                     .text_color(rgb(0x64748b))
@@ -248,9 +294,14 @@ impl RepairApp {
                     .text_xs()
                     .text_color(rgb(0x64748b))
                     .child(format!(
-                        "并发 {} · tile {}",
+                        "并发 {} · tile {}{}",
                         self.workers.max(1),
-                        self.live_tile.max(1)
+                        self.live_tile.max(1),
+                        match (self.chip_c, self.thermal_paused) {
+                            (Some(t), true) => format!(" · 芯片 {t:.0}°C 暂停散热"),
+                            (Some(t), false) => format!(" · 芯片 {t:.0}°C"),
+                            (None, _) => String::new(),
+                        }
                     )),
             )
     }
