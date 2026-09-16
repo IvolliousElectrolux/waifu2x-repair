@@ -77,7 +77,7 @@ pub enum Event {
         err: String,
         requeued: bool,
     },
-    Finished,
+    Finished { error: Option<String> },
 }
 
 pub struct Handle {
@@ -136,7 +136,9 @@ async fn run_pipeline(
         Ok(v) => v,
         Err(e) => {
             send(Event::Status(e.to_string()));
-            send(Event::Finished);
+            send(Event::Finished {
+                error: Some(e.to_string()),
+            });
             return;
         }
     };
@@ -146,12 +148,16 @@ async fn run_pipeline(
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
             send(Event::Status(e.to_string()));
-            send(Event::Finished);
+            send(Event::Finished {
+                error: Some(e.to_string()),
+            });
             return;
         }
         Err(e) => {
             send(Event::Status(e.to_string()));
-            send(Event::Finished);
+            send(Event::Finished {
+                error: Some(e.to_string()),
+            });
             return;
         }
     };
@@ -186,12 +192,16 @@ async fn run_pipeline(
         Ok(Ok(e)) => Arc::new(e),
         Ok(Err(e)) => {
             send(Event::Status(e.to_string()));
-            send(Event::Finished);
+            send(Event::Finished {
+                error: Some(e.to_string()),
+            });
             return;
         }
         Err(e) => {
             send(Event::Status(e.to_string()));
-            send(Event::Finished);
+            send(Event::Finished {
+                error: Some(e.to_string()),
+            });
             return;
         }
     };
@@ -253,7 +263,7 @@ async fn run_pipeline(
     for h in handles {
         let _ = h.await;
     }
-    send(Event::Finished);
+    send(Event::Finished { error: None });
 }
 
 async fn worker(

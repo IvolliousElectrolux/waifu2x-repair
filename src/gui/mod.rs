@@ -365,10 +365,19 @@ impl RepairApp {
                     }
                 }
             }
-            engine::Event::Finished => {
+            engine::Event::Finished { error } => {
                 self.running = false;
                 self.engine = None;
-                self.status = "完成.".into();
+                let started = self.pages.iter().any(|p| {
+                    !matches!(p.status, PageStatus::Queued)
+                });
+                self.status = if let Some(e) = error {
+                    format!("未能开始: {e}").into()
+                } else if started {
+                    "完成.".into()
+                } else {
+                    "队列没有开始处理.".into()
+                };
             }
         }
         cx.notify();

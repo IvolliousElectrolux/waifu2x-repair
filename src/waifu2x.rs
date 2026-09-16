@@ -22,16 +22,34 @@ pub struct OrtEngine {
 impl OrtEngine {
     pub fn load(path: &Path, backend: Backend, warmup_tile: u32) -> Result<Self, Error> {
         prepare_ort()?;
-        let (session, backend_label) = commit_session(path, backend)?;
-        let engine = Self {
-            session: Mutex::new(session),
-            backend_label,
-        };
-        if warmup_tile >= 4 {
-            let dummy = Tensor::zeros(3, warmup_tile as usize, warmup_tile as usize);
-            let _ = engine.run_tile(&dummy)?;
+        let mut last_err: Option<Error> = None;
+        let mut usable: Option<Self> = None;
+        for (eps, label, gpu) in session_attempts(backend) {
+            match commit_session(path, eps, gpu) {
+                Ok(session) => {
+                    let engine = Self {
+                        session: Mutex::new(session),
+                        backend_label: label,
+                    };
+                    if warmup_tile >= 4 {
+                        let dummy = Tensor::zeros(3, warmup_tile as usize, warmup_tile as usize);
+                        if let Err(e) = engine.run_tile(&dummy) {
+                            last_err = Some(e);
+                            if usable.is_none() {
+                                usable = Some(engine);
+                            }
+                            continue;
+                        }
+                    }
+                    return Ok(engine);
+                }
+                Err(e) => last_err = Some(e),
+            }
         }
-        Ok(engine)
+        if let Some(engine) = usable {
+            return Ok(engine);
+        }
+        Err(last_err.unwrap_or_else(|| Error::Infer("无法创建推理会话".into())))
     }
 
     fn run_tile(&self, tile: &Tensor) -> Result<Tensor, Error> {
@@ -101,23 +119,32 @@ fn find_ort_dylib() -> Option<std::path::PathBuf> {
     None
 }
 
-fn commit_session(path: &Path, backend: Backend) -> Result<(Session, String), Error> {
-    let gpu = !matches!(backend, Backend::Cpu);
-    let eps = if gpu {
-        accelerator_eps()
-    } else {
-        Vec::new()
-    };
-
-    if gpu && eps.is_empty() {
-        if backend == Backend::Gpu {
-            return Err(Error::Infer("当前平台没有 GPU 执行提供者".into()));
+fn session_attempts(
+    backend: Backend,
+) -> Vec<(Vec<ep::ExecutionProviderDispatch>, String, bool)> {
+    let mut v = Vec::new();
+    if backend != Backend::Cpu {
+        #[cfg(target_os = "macos")]
+        {
+            v.push((coreml_eps(true), "CoreML GPU".into(), true));
+            v.push((coreml_eps(false), "CoreML".into(), true));
         }
-        return commit_session(path, Backend::Cpu);
+        #[cfg(windows)]
+        {
+            v.push((vec![ep::DirectML::default().build()], "DirectML".into(), true));
+        }
     }
+    v.push((Vec::new(), "CPU".into(), false));
+    v
+}
 
+fn commit_session(
+    path: &Path,
+    eps: Vec<ep::ExecutionProviderDispatch>,
+    gpu: bool,
+) -> Result<Session, Error> {
     let mut b = Session::builder().map_err(|e| Error::Infer(e.to_string()))?;
-    // Level3 会做 NCHWc 等 CPU 布局优化, CoreML/DirectML 吃不下, 图被拆碎后比纯 CPU 还慢.
+    // Level3 的 NCHWc 会让 CoreML/DirectML 拆图; CPU 仍用 Level3.
     let opt = if gpu {
         GraphOptimizationLevel::Level2
     } else {
@@ -137,71 +164,30 @@ fn commit_session(path: &Path, backend: Backend) -> Result<(Session, String), Er
     b = b
         .with_intra_threads(nthreads)
         .map_err(|e| Error::Infer(e.to_string()))?;
-
-    let mut label = if gpu {
-        accelerator_label()
-    } else {
-        "CPU".into()
-    };
     if !eps.is_empty() {
-        match b.with_execution_providers(eps) {
-            Ok(nb) => b = nb,
-            Err(e) => {
-                if backend == Backend::Gpu {
-                    return Err(Error::Infer(format!("GPU 后端不可用: {e}")));
-                }
-                return commit_session(path, Backend::Cpu);
-            }
-        }
-    } else {
-        label = "CPU".into();
+        b = b
+            .with_execution_providers(eps)
+            .map_err(|e| Error::Infer(e.to_string()))?;
     }
-
-    let session = b
-        .commit_from_file(path)
-        .map_err(|e| Error::Infer(format!("加载 {}: {e}", path.display())))?;
-    Ok((session, label))
+    b.commit_from_file(path)
+        .map_err(|e| Error::Infer(format!("加载 {}: {e}", path.display())))
 }
 
-fn accelerator_label() -> String {
-    #[cfg(windows)]
-    {
-        "DirectML".into()
+#[cfg(target_os = "macos")]
+fn coreml_eps(fast: bool) -> Vec<ep::ExecutionProviderDispatch> {
+    if !fast {
+        return vec![ep::CoreML::default().build()];
     }
-    #[cfg(target_os = "macos")]
-    {
-        "CoreML GPU".into()
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        "CPU".into()
-    }
-}
-
-fn accelerator_eps() -> Vec<ep::ExecutionProviderDispatch> {
-    let mut v = Vec::new();
-    #[cfg(windows)]
-    {
-        v.push(ep::DirectML::default().build());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use ort::ep::coreml::{ComputeUnits, ModelFormat, SpecializationStrategy};
-        let cache = crate::config::cache_dir().join("coreml");
-        let _ = std::fs::create_dir_all(&cache);
-        // 默认 NeuralNetwork 不支持 Swin 的 LayerNorm/GELU, 图被拆到 CPU,
-        // 还伴随 CoreML 每次启动重新编译; MLProgram + GPU + 磁盘缓存才接近网页 WebGPU.
-        v.push(
-            ep::CoreML::default()
-                .with_model_format(ModelFormat::MLProgram)
-                .with_compute_units(ComputeUnits::CPUAndGPU)
-                .with_specialization_strategy(SpecializationStrategy::FastPrediction)
-                .with_low_precision_accumulation_on_gpu(true)
-                .with_model_cache_dir(cache.to_string_lossy().into_owned())
-                .build(),
-        );
-    }
-    v
+    use ort::ep::coreml::{ComputeUnits, ModelFormat, SpecializationStrategy};
+    let cache = crate::config::cache_dir().join("coreml");
+    let _ = std::fs::create_dir_all(&cache);
+    vec![ep::CoreML::default()
+        .with_model_format(ModelFormat::MLProgram)
+        .with_compute_units(ComputeUnits::CPUAndGPU)
+        .with_specialization_strategy(SpecializationStrategy::FastPrediction)
+        .with_low_precision_accumulation_on_gpu(true)
+        .with_model_cache_dir(cache.to_string_lossy().into_owned())
+        .build()]
 }
 
 pub struct UpscaleSettings {
