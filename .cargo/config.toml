@@ -1,3 +1,7 @@
 # 加速链接 (Windows MSVC). rust-lld 随 rustc 自带.
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
+
+# WebGPU/Dawn 辅助 dylib 从可执行文件同目录加载.
+[target.aarch64-apple-darwin]
+rustflags = ["-Clink-args=-Wl,-rpath,@loader_path"]

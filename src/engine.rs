@@ -176,8 +176,8 @@ async fn run_pipeline(
     let workers = 1;
 
     send(Event::Status(
-        if cfg!(target_os = "macos") && settings.backend != Backend::Cpu {
-            "加载推理后端 (首次会编译 CoreML, 之后走缓存)…".into()
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) && settings.backend != Backend::Cpu {
+            "加载 GPU (首次会编译 WebGPU 着色器, 可能要几十秒)…".into()
         } else {
             "加载推理后端…".into()
         },

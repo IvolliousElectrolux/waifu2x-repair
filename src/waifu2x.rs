@@ -124,6 +124,11 @@ fn session_attempts(
 ) -> Vec<(Vec<ep::ExecutionProviderDispatch>, String, bool)> {
     let mut v = Vec::new();
     if backend != Backend::Cpu {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            v.push((webgpu_eps(true), "WebGPU".into(), true));
+            v.push((webgpu_eps(false), "WebGPU".into(), true));
+        }
         #[cfg(target_os = "macos")]
         {
             v.push((coreml_eps(true), "CoreML GPU".into(), true));
@@ -136,6 +141,17 @@ fn session_attempts(
     }
     v.push((Vec::new(), "CPU".into(), false));
     v
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn webgpu_eps(graph_capture: bool) -> Vec<ep::ExecutionProviderDispatch> {
+    use ort::ep::webgpu::{BufferCacheMode, ValidationMode};
+    vec![ep::WebGPU::default()
+        .with_enable_graph_capture(graph_capture)
+        .with_default_buffer_cache_mode(BufferCacheMode::Bucket)
+        .with_storage_buffer_cache_mode(BufferCacheMode::Bucket)
+        .with_validation_mode(ValidationMode::Disabled)
+        .build()]
 }
 
 fn commit_session(

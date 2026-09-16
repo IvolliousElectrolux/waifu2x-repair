@@ -84,9 +84,9 @@ jobs:
           test -n "$DYLIB"
           cp "$DYLIB" "$STAGE/libpdfium.dylib"
 
-          # arm64: ort copy-dylibs; x64: Microsoft 1.23.2 (最后一版官方 Intel Mac)
-          find "target/${{ matrix.target }}/release" -maxdepth 1 \( -name 'libonnxruntime*.dylib' -o -name 'libonnxruntime*' \) -exec cp {} "$STAGE/" \; || true
-          find "target/${{ matrix.target }}/release/deps" -maxdepth 1 -name 'libonnxruntime*.dylib' -exec cp {} "$STAGE/" \; || true
+          # arm64: ort + WebGPU/Dawn dylib; x64: Microsoft 1.23.2 (最后一版官方 Intel Mac)
+          find "target/${{ matrix.target }}/release" -maxdepth 1 -name '*.dylib' -exec cp -L {} "$STAGE/" \; || true
+          find "target/${{ matrix.target }}/release/deps" -maxdepth 1 -name '*.dylib' -exec cp -L {} "$STAGE/" \; || true
           if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
             ORT_DY=$(find "${RUNNER_TEMP}/ort-osx-x64" -name 'libonnxruntime.dylib' | head -n 1)
             test -n "$ORT_DY"

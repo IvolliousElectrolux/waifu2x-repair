@@ -51,7 +51,11 @@ impl Default for Config {
             model: ModelId::default(),
             noise_level: 2,
             scale: Scale::X1,
-            tile_size: TileSize::T256,
+            tile_size: if cfg!(target_os = "macos") {
+                TileSize::T400
+            } else {
+                TileSize::T256
+            },
             tile_shuffle: false,
             tta: TtaLevel::Off,
             alpha: AlphaMode::Auto,

@@ -80,11 +80,9 @@ impl Tensor {
         let mut out = Self::zeros(self.c, th, tw);
         for c in 0..self.c {
             for iy in 0..th {
-                for ix in 0..tw {
-                    let dst = Self::idx(c, iy, ix, th, tw);
-                    let src = Self::idx(c, y + iy, x + ix, self.h, self.w);
-                    out.data[dst] = self.data[src];
-                }
+                let dst = c * th * tw + iy * tw;
+                let src = c * self.h * self.w + (y + iy) * self.w + x;
+                out.data[dst..dst + tw].copy_from_slice(&self.data[src..src + tw]);
             }
         }
         out
