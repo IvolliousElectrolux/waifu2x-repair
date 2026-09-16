@@ -186,18 +186,16 @@ fn accelerator_eps() -> Vec<ep::ExecutionProviderDispatch> {
     }
     #[cfg(target_os = "macos")]
     {
-        use ort::execution_providers::coreml::{
-            CoreMLComputeUnits, CoreMLModelFormat, CoreMLSpecializationStrategy,
-        };
+        use ort::ep::coreml::{ComputeUnits, ModelFormat, SpecializationStrategy};
         let cache = crate::config::cache_dir().join("coreml");
         let _ = std::fs::create_dir_all(&cache);
         // 默认 NeuralNetwork 不支持 Swin 的 LayerNorm/GELU, 图被拆到 CPU,
         // 还伴随 CoreML 每次启动重新编译; MLProgram + GPU + 磁盘缓存才接近网页 WebGPU.
         v.push(
             ep::CoreML::default()
-                .with_model_format(CoreMLModelFormat::MLProgram)
-                .with_compute_units(CoreMLComputeUnits::CPUAndGPU)
-                .with_specialization_strategy(CoreMLSpecializationStrategy::FastPrediction)
+                .with_model_format(ModelFormat::MLProgram)
+                .with_compute_units(ComputeUnits::CPUAndGPU)
+                .with_specialization_strategy(SpecializationStrategy::FastPrediction)
                 .with_low_precision_accumulation_on_gpu(true)
                 .with_model_cache_dir(cache.to_string_lossy().into_owned())
                 .build(),
