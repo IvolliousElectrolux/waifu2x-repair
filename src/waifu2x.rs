@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use image::RgbImage;
 use ort::ep;
+use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::Tensor as OrtTensor;
 
@@ -15,30 +16,22 @@ use crate::tensor::{tta_variants, Tensor, TtaOp};
 
 pub struct OrtEngine {
     session: Mutex<Session>,
+    pub backend_label: String,
 }
 
 impl OrtEngine {
-    pub fn load(path: &Path, backend: Backend) -> Result<Self, Error> {
+    pub fn load(path: &Path, backend: Backend, warmup_tile: u32) -> Result<Self, Error> {
         prepare_ort()?;
-        let mut b = Session::builder().map_err(|e| Error::Infer(e.to_string()))?;
-        let eps = execution_providers(backend);
-        if !eps.is_empty() {
-            b = b
-                .with_execution_providers(eps)
-                .map_err(|e| Error::Infer(e.to_string()))?;
-        }
-        let nthreads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        b = b
-            .with_intra_threads(nthreads.max(1))
-            .map_err(|e| Error::Infer(e.to_string()))?;
-        let session = b
-            .commit_from_file(path)
-            .map_err(|e| Error::Infer(format!("加载 {}: {e}", path.display())))?;
-        Ok(Self {
+        let (session, backend_label) = commit_session(path, backend)?;
+        let engine = Self {
             session: Mutex::new(session),
-        })
+            backend_label,
+        };
+        if warmup_tile >= 4 {
+            let dummy = Tensor::zeros(3, warmup_tile as usize, warmup_tile as usize);
+            let _ = engine.run_tile(&dummy)?;
+        }
+        Ok(engine)
     }
 
     fn run_tile(&self, tile: &Tensor) -> Result<Tensor, Error> {
@@ -108,22 +101,109 @@ fn find_ort_dylib() -> Option<std::path::PathBuf> {
     None
 }
 
-fn execution_providers(backend: Backend) -> Vec<ep::ExecutionProviderDispatch> {
-    match backend {
-        Backend::Cpu => Vec::new(),
-        Backend::Gpu | Backend::Auto => {
-            let mut v = Vec::new();
-            #[cfg(windows)]
-            {
-                v.push(ep::DirectML::default().build());
-            }
-            #[cfg(target_os = "macos")]
-            {
-                v.push(ep::CoreML::default().build());
-            }
-            v
+fn commit_session(path: &Path, backend: Backend) -> Result<(Session, String), Error> {
+    let gpu = !matches!(backend, Backend::Cpu);
+    let eps = if gpu {
+        accelerator_eps()
+    } else {
+        Vec::new()
+    };
+
+    if gpu && eps.is_empty() {
+        if backend == Backend::Gpu {
+            return Err(Error::Infer("当前平台没有 GPU 执行提供者".into()));
         }
+        return commit_session(path, Backend::Cpu);
     }
+
+    let mut b = Session::builder().map_err(|e| Error::Infer(e.to_string()))?;
+    // Level3 会做 NCHWc 等 CPU 布局优化, CoreML/DirectML 吃不下, 图被拆碎后比纯 CPU 还慢.
+    let opt = if gpu {
+        GraphOptimizationLevel::Level2
+    } else {
+        GraphOptimizationLevel::Level3
+    };
+    b = b
+        .with_optimization_level(opt)
+        .map_err(|e| Error::Infer(e.to_string()))?;
+    let nthreads = if gpu {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(1)
+    };
+    b = b
+        .with_intra_threads(nthreads)
+        .map_err(|e| Error::Infer(e.to_string()))?;
+
+    let mut label = if gpu {
+        accelerator_label()
+    } else {
+        "CPU".into()
+    };
+    if !eps.is_empty() {
+        match b.with_execution_providers(eps) {
+            Ok(nb) => b = nb,
+            Err(e) => {
+                if backend == Backend::Gpu {
+                    return Err(Error::Infer(format!("GPU 后端不可用: {e}")));
+                }
+                return commit_session(path, Backend::Cpu);
+            }
+        }
+    } else {
+        label = "CPU".into();
+    }
+
+    let session = b
+        .commit_from_file(path)
+        .map_err(|e| Error::Infer(format!("加载 {}: {e}", path.display())))?;
+    Ok((session, label))
+}
+
+fn accelerator_label() -> String {
+    #[cfg(windows)]
+    {
+        "DirectML".into()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "CoreML GPU".into()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        "CPU".into()
+    }
+}
+
+fn accelerator_eps() -> Vec<ep::ExecutionProviderDispatch> {
+    let mut v = Vec::new();
+    #[cfg(windows)]
+    {
+        v.push(ep::DirectML::default().build());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use ort::execution_providers::coreml::{
+            CoreMLComputeUnits, CoreMLModelFormat, CoreMLSpecializationStrategy,
+        };
+        let cache = crate::config::cache_dir().join("coreml");
+        let _ = std::fs::create_dir_all(&cache);
+        // 默认 NeuralNetwork 不支持 Swin 的 LayerNorm/GELU, 图被拆到 CPU,
+        // 还伴随 CoreML 每次启动重新编译; MLProgram + GPU + 磁盘缓存才接近网页 WebGPU.
+        v.push(
+            ep::CoreML::default()
+                .with_model_format(CoreMLModelFormat::MLProgram)
+                .with_compute_units(CoreMLComputeUnits::CPUAndGPU)
+                .with_specialization_strategy(CoreMLSpecializationStrategy::FastPrediction)
+                .with_low_precision_accumulation_on_gpu(true)
+                .with_model_cache_dir(cache.to_string_lossy().into_owned())
+                .build(),
+        );
+    }
+    v
 }
 
 pub struct UpscaleSettings {

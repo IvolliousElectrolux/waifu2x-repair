@@ -46,6 +46,7 @@ pub struct RunSettings {
     pub tile: TileSize,
     pub shuffle: bool,
     pub tta: u32,
+    pub binarize: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -126,7 +127,7 @@ async fn run_pipeline(
         let _ = ev.send(e);
     };
     send(Event::Status("准备模型…".into()));
-    let (method, _tile_px) = match models::resolve(
+    let (method, tile_px) = match models::resolve(
         settings.model,
         settings.scale,
         settings.noise,
@@ -164,21 +165,21 @@ async fn run_pipeline(
         budget,
     });
 
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let mut workers = cores.clamp(1, 8);
-    if settings.backend != Backend::Cpu {
-        workers = workers.min(2);
-    }
-    if budget < 2 * 1024 * 1024 * 1024 {
-        workers = 1;
-    }
+    // Session 有 Mutex, 多 worker 不能并行推理, 反而会同时把两张大图塞进内存,
+    // M 系列上还容易触发收缩 tile, 变得更慢. GPU/CoreML 只跑 1 路.
+    let workers = 1;
 
+    send(Event::Status(
+        if cfg!(target_os = "macos") && settings.backend != Backend::Cpu {
+            "加载推理后端 (首次会编译 CoreML, 之后走缓存)…".into()
+        } else {
+            "加载推理后端…".into()
+        },
+    ));
     let engine = match tokio::task::spawn_blocking({
         let path = model_path.clone();
         let backend = settings.backend;
-        move || OrtEngine::load(&path, backend)
+        move || OrtEngine::load(&path, backend, tile_px)
     })
     .await
     {
@@ -194,6 +195,10 @@ async fn run_pipeline(
             return;
         }
     };
+    send(Event::Status(format!(
+        "推理后端 {} / {}",
+        engine.backend_label, method.method
+    )));
 
     let queue = Arc::new(Mutex::new(VecDeque::from_iter(jobs.into_iter().map(|job| {
         Item {
@@ -355,6 +360,7 @@ async fn worker(
         let ev2 = ev.clone();
         let id = item.job.id;
         let out_path = item.job.out_path.clone();
+        let binarize = settings.binarize;
         let result = tokio::task::spawn_blocking(move || {
             let img = waifu2x::upscale(&rgb, &engine2, &up, |done, total| {
                 let _ = ev2.send(Event::Tile { id, done, total });
@@ -362,8 +368,12 @@ async fn worker(
             if let Some(parent) = out_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| Error::msg(e.to_string()))?;
             }
-            img.save(&out_path)
-                .map_err(|e| Error::msg(format!("写 {}: {e}", out_path.display())))?;
+            if binarize {
+                crate::binarize::save_binary_png(&img, &out_path)?;
+            } else {
+                img.save(&out_path)
+                    .map_err(|e| Error::msg(format!("写 {}: {e}", out_path.display())))?;
+            }
             Ok::<_, Error>((img.width(), img.height()))
         })
         .await;

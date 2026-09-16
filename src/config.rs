@@ -30,6 +30,8 @@ pub struct Config {
     #[serde(default)]
     pub alpha: AlphaMode,
     #[serde(default)]
+    pub binarize: bool,
+    #[serde(default)]
     pub out_dir: String,
 }
 
@@ -53,6 +55,7 @@ impl Default for Config {
             tile_shuffle: false,
             tta: TtaLevel::Off,
             alpha: AlphaMode::Auto,
+            binarize: false,
             out_dir: String::new(),
         }
     }

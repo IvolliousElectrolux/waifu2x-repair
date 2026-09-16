@@ -63,6 +63,7 @@ struct SettingsUi {
     shuffle: bool,
     tta: TtaLevel,
     alpha: AlphaMode,
+    binarize: bool,
 }
 
 pub(crate) struct RepairApp {
@@ -117,6 +118,7 @@ impl RepairApp {
                 shuffle: cfg.tile_shuffle,
                 tta: cfg.tta,
                 alpha: cfg.alpha,
+                binarize: cfg.binarize,
             },
             out_dir,
             status: "拖入或打开 PDF / 图片.".into(),
@@ -141,6 +143,7 @@ impl RepairApp {
         cfg.tile_shuffle = self.settings.shuffle;
         cfg.tta = self.settings.tta;
         cfg.alpha = self.settings.alpha;
+        cfg.binarize = self.settings.binarize;
         cfg.out_dir = self.out_dir.display().to_string();
         config::save(&cfg);
     }
@@ -283,6 +286,7 @@ impl RepairApp {
             tile: self.settings.tile,
             shuffle: self.settings.shuffle,
             tta: self.settings.tta.n(),
+            binarize: self.settings.binarize,
         };
         let (handle, mut rx) = EngineHandle::start(jobs, settings);
         self.engine = Some(handle);

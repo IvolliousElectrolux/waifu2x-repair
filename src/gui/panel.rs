@@ -149,7 +149,11 @@ impl RepairApp {
                 div()
                     .text_xs()
                     .text_color(rgb(0x64748b))
-                    .child("256 is recommended"),
+                    .child(if cfg!(target_os = "macos") {
+                        "网页建议 256; M 系列可试 400 或 640 (更大更快)"
+                    } else {
+                        "256 is recommended"
+                    }),
             )
             .child(self.choice_row(
                 "TTA",
@@ -191,6 +195,42 @@ impl RepairApp {
                 }),
                 cx,
             ))
+            .child(
+                div()
+                    .id("binarize")
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_xs().text_color(rgb(0x334155)).child("输出"))
+                    .child(
+                        div()
+                            .id("binarize-toggle")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .text_xs()
+                            .cursor_pointer()
+                            .child(if self.settings.binarize { "☑" } else { "☐" })
+                            .child("二值化")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    if this.running {
+                                        return;
+                                    }
+                                    this.settings.binarize = !this.settings.binarize;
+                                    this.persist(cx);
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x64748b))
+                            .child("Otsu 阈值写成 1-bit PNG, 谱面体积会小很多"),
+                    ),
+            )
             .child(
                 div()
                     .mt_2()

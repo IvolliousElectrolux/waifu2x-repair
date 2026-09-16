@@ -1,6 +1,6 @@
 # waifu2x repair
 
-批量导入 PDF / 图片, 用 [unlimited:waifu2x](https://unlimited.waifu2x.net/) 同款 ONNX 在**本地**修复 (图片不会上传). 界面参数与网站一致: Backend / Model / DeNoise / Upscaling / Tile / Shuffle / TTA / Alpha.
+批量导入 PDF / 图片, 用 [unlimited:waifu2x](https://unlimited.waifu2x.net/) 同款 ONNX 在**本地**修复 (图片不会上传). 界面参数与网站一致: Backend / Model / DeNoise / Upscaling / Tile / Shuffle / TTA / Alpha. 另有 **二值化**: 修复后 Otsu 阈值写成 1-bit PNG, 用来压体积.
 
 PDF:
 - 整页嵌入图直接抽像素
@@ -11,7 +11,7 @@ PDF:
 
 ## 依赖
 
-发行包需在可执行文件同目录放 pdfium 动态库 (`pdfium.dll` / `libpdfium.dylib`). ONNX Runtime 由构建时下载并打进包.
+发行包需在可执行文件同目录放 pdfium 动态库 (`pdfium.dll` / `libpdfium.dylib`). ONNX Runtime 由构建时下载并打进包 (Intel Mac 用 Microsoft 最后一版 osx-x86_64 1.23.2).
 
 ## 构建
 
