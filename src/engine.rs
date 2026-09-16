@@ -164,16 +164,20 @@ async fn run_pipeline(
     send(Event::ModelReady(method.method.clone()));
 
     let snap = mem::snap();
-    let budget = ((snap.available as f64) * 0.85) as u64;
+    // macOS 高内存压力时 available 会很低 (其他进程被压缩), 不等于这台机器不能再给 GPU 用.
+    // 留约 3GB 给系统, 其余当预算, 才能像网站那样两张一起修.
+    const RESERVE: u64 = 3 * 1024 * 1024 * 1024;
+    let from_total = snap.total.saturating_sub(RESERVE);
+    let from_avail = ((snap.available as f64) * 0.85) as u64;
+    let budget = from_total.max(from_avail).max(1);
     send(Event::Mem {
         process: snap.process,
         available: snap.available,
         budget,
     });
 
-    // Session 有 Mutex, 多 worker 不能并行推理, 反而会同时把两张大图塞进内存,
-    // M 系列上还容易触发收缩 tile, 变得更慢. GPU/CoreML 只跑 1 路.
-    let workers = 1;
+    // 每路要独立 Session: Mutex<Session> 不能并行. 网站也是两张同时修.
+    let want_workers = if settings.backend == Backend::Cpu { 1 } else { 2 };
 
     send(Event::Status(
         if cfg!(all(target_os = "macos", target_arch = "aarch64")) && settings.backend != Backend::Cpu {
@@ -182,32 +186,45 @@ async fn run_pipeline(
             "加载推理后端…".into()
         },
     ));
-    let engine = match tokio::task::spawn_blocking({
-        let path = model_path.clone();
-        let backend = settings.backend;
-        move || OrtEngine::load(&path, backend, tile_px)
-    })
-    .await
-    {
-        Ok(Ok(e)) => Arc::new(e),
-        Ok(Err(e)) => {
-            send(Event::Status(e.to_string()));
-            send(Event::Finished {
-                error: Some(e.to_string()),
-            });
-            return;
+    let mut engines: Vec<Arc<OrtEngine>> = Vec::new();
+    for i in 0..want_workers {
+        if want_workers > 1 {
+            send(Event::Status(format!(
+                "加载推理后端 ({}/{})…",
+                i + 1,
+                want_workers
+            )));
         }
-        Err(e) => {
-            send(Event::Status(e.to_string()));
-            send(Event::Finished {
-                error: Some(e.to_string()),
-            });
-            return;
+        let loaded = tokio::task::spawn_blocking({
+            let path = model_path.clone();
+            let backend = settings.backend;
+            move || OrtEngine::load(&path, backend, tile_px)
+        })
+        .await;
+        match loaded {
+            Ok(Ok(e)) => engines.push(Arc::new(e)),
+            Ok(Err(e)) if engines.is_empty() => {
+                send(Event::Status(e.to_string()));
+                send(Event::Finished {
+                    error: Some(e.to_string()),
+                });
+                return;
+            }
+            Err(e) if engines.is_empty() => {
+                send(Event::Status(e.to_string()));
+                send(Event::Finished {
+                    error: Some(e.to_string()),
+                });
+                return;
+            }
+            Ok(Err(_)) | Err(_) => break,
         }
-    };
+    }
+    let workers = engines.len();
+    let backend_label = engines[0].backend_label.clone();
     send(Event::Status(format!(
-        "推理后端 {} / {}",
-        engine.backend_label, method.method
+        "推理后端 {backend_label} / {} · {workers} 路",
+        method.method
     )));
 
     let queue = Arc::new(Mutex::new(VecDeque::from_iter(jobs.into_iter().map(|job| {
@@ -237,7 +254,7 @@ async fn run_pipeline(
         let tile_cap = tile_cap.clone();
         let notify = notify.clone();
         let reserved = reserved.clone();
-        let engine = engine.clone();
+        let engine = engines[wid].clone();
         let settings = settings.clone();
         let method = method.clone();
         handles.push(tokio::spawn(async move {
@@ -404,8 +421,10 @@ async fn worker(
             Ok(Err(e)) => {
                 let err = e;
                 let oom = err.is_oom();
+                let write_fail = is_write_err(&err);
                 item.retries += 1;
-                let requeue = item.retries <= MAX_RETRY;
+                // 写 PNG 失败重排没有意义 (推理已经做完), 只会空烧时间.
+                let requeue = item.retries <= MAX_RETRY && !write_fail;
                 if oom {
                     shrink(&workers_n, &tile_cap, &ev).await;
                 }
@@ -454,6 +473,10 @@ async fn worker(
 
 fn load_skip(e: &Error) -> bool {
     e.to_string().contains("矢量页")
+}
+
+fn is_write_err(e: &Error) -> bool {
+    e.to_string().contains("写 ")
 }
 
 fn load_rgb(job: &PageJob) -> Result<RgbImage, Error> {

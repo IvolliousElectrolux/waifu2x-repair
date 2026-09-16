@@ -5732,6 +5732,7 @@ dependencies = [
  "image",
  "ort",
  "pdfium-render",
+ "png 0.18.1",
  "rand 0.8.8",
  "rfd",
  "serde",

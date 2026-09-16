@@ -4,8 +4,8 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
-use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-use image::{ExtendedColorType, ImageEncoder, RgbImage};
+use image::RgbImage;
+use png::{BitDepth, ColorType, Compression, Encoder};
 
 use crate::error::Error;
 
@@ -17,13 +17,15 @@ pub fn save_binary_png(rgb: &RgbImage, path: &Path) -> Result<(), Error> {
     let thr = otsu(&luma);
     let packed = pack_l1(&luma, w, h, thr);
     let file = File::create(path).map_err(|e| Error::msg(format!("写 {}: {e}", path.display())))?;
-    let encoder = PngEncoder::new_with_quality(
-        BufWriter::new(file),
-        CompressionType::Best,
-        FilterType::Adaptive,
-    );
-    encoder
-        .write_image(&packed, w, h, ExtendedColorType::L1)
+    let mut encoder = Encoder::new(BufWriter::new(file), w, h);
+    encoder.set_color(ColorType::Grayscale);
+    encoder.set_depth(BitDepth::One);
+    encoder.set_compression(Compression::Fast);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| Error::msg(format!("写 1-bit PNG {}: {e}", path.display())))?;
+    writer
+        .write_image_data(&packed)
         .map_err(|e| Error::msg(format!("写 1-bit PNG {}: {e}", path.display())))?;
     Ok(())
 }
@@ -90,7 +92,8 @@ fn pack_l1(luma: &[u8], w: u32, h: u32, thr: u8) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::otsu;
+    use super::{otsu, save_binary_png};
+    use image::RgbImage;
 
     #[test]
     fn otsu_splits_two_peaks() {
@@ -98,5 +101,21 @@ mod tests {
         luma.extend(std::iter::repeat(200u8).take(100));
         let t = otsu(&luma);
         assert!(10 <= t && 200 > t, "thr={t} should separate 10 and 200");
+    }
+
+    #[test]
+    fn writes_one_bit_png() {
+        let mut img = RgbImage::new(16, 8);
+        for p in img.pixels_mut() {
+            *p = image::Rgb([255, 255, 255]);
+        }
+        img.put_pixel(0, 0, image::Rgb([0, 0, 0]));
+        let path = std::env::temp_dir().join("waifu2x_repair_l1_test.png");
+        save_binary_png(&img, &path).expect("write 1-bit png");
+        let decoded = image::open(&path).expect("reopen").to_luma8();
+        assert_eq!(decoded.dimensions(), (16, 8));
+        assert!(decoded.get_pixel(0, 0)[0] < 128);
+        assert!(decoded.get_pixel(1, 0)[0] > 128);
+        let _ = std::fs::remove_file(path);
     }
 }
