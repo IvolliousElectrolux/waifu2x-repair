@@ -144,16 +144,39 @@ impl SeamBlending {
     }
 
     pub fn finish(self) -> Tensor {
-        let mut out = Tensor::zeros(3, self.param.y_h, self.param.y_w);
+        let y_h = self.param.y_h;
+        let y_w = self.param.y_w;
+        let src_h = self.pixels.h;
+        let src_w = self.pixels.w;
+        drop(self.weights);
+        drop(self.filter);
+        let mut pixels = self.pixels;
+        if src_h == y_h && src_w == y_w {
+            for v in &mut pixels.data {
+                *v = (*v).clamp(0.0, 1.0);
+            }
+            return pixels;
+        }
+        let mut data = std::mem::take(&mut pixels.data);
         for c in 0..3 {
-            for y in 0..self.param.y_h {
-                for x in 0..self.param.y_w {
-                    let src = c * self.pixels.h * self.pixels.w + y * self.pixels.w + x;
-                    let dst = c * out.h * out.w + y * out.w + x;
-                    out.data[dst] = self.pixels.data[src].clamp(0.0, 1.0);
+            for y in 0..y_h {
+                let src = c * src_h * src_w + y * src_w;
+                let dst = c * y_h * y_w + y * y_w;
+                if dst != src {
+                    data.copy_within(src..src + y_w, dst);
                 }
             }
         }
-        out
+        data.truncate(3 * y_h * y_w);
+        data.shrink_to_fit();
+        for v in &mut data {
+            *v = (*v).clamp(0.0, 1.0);
+        }
+        Tensor {
+            data,
+            c: 3,
+            h: y_h,
+            w: y_w,
+        }
     }
 }

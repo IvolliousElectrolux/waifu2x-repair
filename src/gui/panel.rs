@@ -150,7 +150,7 @@ impl RepairApp {
                     .text_xs()
                     .text_color(rgb(0x64748b))
                     .child(if cfg!(target_os = "macos") {
-                        "M 系列请用 400 或 640; 左下角应显示 WebGPU"
+                        "M 系列请用 400 或 640; 一次只修一页, 左下角应显示 WebGPU"
                     } else {
                         "256 is recommended"
                     }),

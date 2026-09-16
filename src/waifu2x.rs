@@ -218,12 +218,26 @@ pub fn estimate_job_bytes(w: u32, h: u32, settings: &UpscaleSettings) -> u64 {
     let tile = settings.tile as u64;
     let tta = settings.tta.max(1) as u64;
     let in_hw = w as u64 * h as u64;
-    let padded = in_hw.saturating_mul(2).saturating_add(tile * tile);
+    let out_hw = in_hw.saturating_mul(scale).saturating_mul(scale);
     let f32c = 4u64;
-    let input = padded * 3 * f32c;
-    let out = in_hw * scale * scale * 3 * f32c * 2;
+    let rgb_in = in_hw.saturating_mul(3);
+    let x = in_hw.saturating_mul(3).saturating_mul(f32c);
+    let padded = in_hw
+        .saturating_mul(2)
+        .saturating_add(tile * tile)
+        .saturating_mul(3)
+        .saturating_mul(f32c);
+    // pixels + weights, 接近两份 4x f32
+    let seam = out_hw.saturating_mul(3).saturating_mul(f32c).saturating_mul(2);
+    let rgb_out = out_hw.saturating_mul(3);
     let tile_buf = tile * tile * 3 * f32c * tta;
-    input.saturating_add(out).saturating_add(tile_buf).saturating_add(64 * 1024 * 1024)
+    rgb_in
+        .saturating_add(x)
+        .saturating_add(padded)
+        .saturating_add(seam)
+        .saturating_add(rgb_out)
+        .saturating_add(tile_buf)
+        .saturating_add(64 * 1024 * 1024)
 }
 
 pub fn upscale(
@@ -237,6 +251,7 @@ pub fn upscale(
     let mut seam = SeamBlending::new(x.h, x.w, settings.cfg.scale, settings.cfg.offset, settings.tile);
     let p = seam.param.clone();
     let padded = x.pad(p.pad[0], p.pad[1], p.pad[2], p.pad[3], settings.cfg.padding);
+    drop(x);
     let mut tiles = Vec::new();
     for h_i in 0..p.h_blocks {
         for w_i in 0..p.w_blocks {
@@ -268,6 +283,7 @@ pub fn upscale(
         seam.update(&tile_y, h_i, w_i);
         on_tile(k + 1, total);
     }
+    drop(padded);
     Ok(seam.finish().to_rgb())
 }
 

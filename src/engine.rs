@@ -1,4 +1,4 @@
-//! 全异步队列: 按可用内存决定并发, 失败 (含 OOM) 重新入队并收缩线程/tile.
+//! 全异步队列: 只存路径, 一次读一页进内存, 修完释放; 失败 (含 OOM) 重新入队并收缩 tile.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -164,20 +164,13 @@ async fn run_pipeline(
     send(Event::ModelReady(method.method.clone()));
 
     let snap = mem::snap();
-    // macOS 高内存压力时 available 会很低 (其他进程被压缩), 不等于这台机器不能再给 GPU 用.
-    // 留约 3GB 给系统, 其余当预算, 才能像网站那样两张一起修.
-    const RESERVE: u64 = 3 * 1024 * 1024 * 1024;
-    let from_total = snap.total.saturating_sub(RESERVE);
-    let from_avail = ((snap.available as f64) * 0.85) as u64;
-    let budget = from_total.max(from_avail).max(1);
+    // 只用来显示; 真正约束是下面固定 1 路: 队列只存路径, 同一时刻只解码/修复一页.
+    let budget = snap.total.saturating_sub(2 * 1024 * 1024 * 1024).max(1);
     send(Event::Mem {
         process: snap.process,
         available: snap.available,
         budget,
     });
-
-    // 每路要独立 Session: Mutex<Session> 不能并行. 网站也是两张同时修.
-    let want_workers = if settings.backend == Backend::Cpu { 1 } else { 2 };
 
     send(Event::Status(
         if cfg!(all(target_os = "macos", target_arch = "aarch64")) && settings.backend != Backend::Cpu {
@@ -186,45 +179,33 @@ async fn run_pipeline(
             "加载推理后端…".into()
         },
     ));
-    let mut engines: Vec<Arc<OrtEngine>> = Vec::new();
-    for i in 0..want_workers {
-        if want_workers > 1 {
-            send(Event::Status(format!(
-                "加载推理后端 ({}/{})…",
-                i + 1,
-                want_workers
-            )));
+    let engine = match tokio::task::spawn_blocking({
+        let path = model_path.clone();
+        let backend = settings.backend;
+        move || OrtEngine::load(&path, backend, tile_px)
+    })
+    .await
+    {
+        Ok(Ok(e)) => Arc::new(e),
+        Ok(Err(e)) => {
+            send(Event::Status(e.to_string()));
+            send(Event::Finished {
+                error: Some(e.to_string()),
+            });
+            return;
         }
-        let loaded = tokio::task::spawn_blocking({
-            let path = model_path.clone();
-            let backend = settings.backend;
-            move || OrtEngine::load(&path, backend, tile_px)
-        })
-        .await;
-        match loaded {
-            Ok(Ok(e)) => engines.push(Arc::new(e)),
-            Ok(Err(e)) if engines.is_empty() => {
-                send(Event::Status(e.to_string()));
-                send(Event::Finished {
-                    error: Some(e.to_string()),
-                });
-                return;
-            }
-            Err(e) if engines.is_empty() => {
-                send(Event::Status(e.to_string()));
-                send(Event::Finished {
-                    error: Some(e.to_string()),
-                });
-                return;
-            }
-            Ok(Err(_)) | Err(_) => break,
+        Err(e) => {
+            send(Event::Status(e.to_string()));
+            send(Event::Finished {
+                error: Some(e.to_string()),
+            });
+            return;
         }
-    }
-    let workers = engines.len();
-    let backend_label = engines[0].backend_label.clone();
+    };
+    let workers = 1;
     send(Event::Status(format!(
-        "推理后端 {backend_label} / {} · {workers} 路",
-        method.method
+        "推理后端 {} / {} · 一次一页",
+        engine.backend_label, method.method
     )));
 
     let queue = Arc::new(Mutex::new(VecDeque::from_iter(jobs.into_iter().map(|job| {
@@ -254,7 +235,7 @@ async fn run_pipeline(
         let tile_cap = tile_cap.clone();
         let notify = notify.clone();
         let reserved = reserved.clone();
-        let engine = engines[wid].clone();
+        let engine = engine.clone();
         let settings = settings.clone();
         let method = method.clone();
         handles.push(tokio::spawn(async move {
@@ -392,6 +373,7 @@ async fn worker(
             let img = waifu2x::upscale(&rgb, &engine2, &up, |done, total| {
                 let _ = ev2.send(Event::Tile { id, done, total });
             })?;
+            drop(rgb);
             if let Some(parent) = out_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| Error::msg(e.to_string()))?;
             }

@@ -145,12 +145,14 @@ fn classify_page(page: &PdfPage<'_>) -> (PageKind, Option<(u32, u32)>) {
     let mut other = 0u32;
     for obj in page.objects().iter() {
         if let Some(img) = obj.as_image_object() {
-            let Ok(bmp) = img.get_raw_bitmap() else {
-                other += 1;
-                continue;
+            // 只读 metadata, 不要 get_raw_bitmap: 整本扫描 PDF 会把每一页都解码进内存.
+            let (w, h) = match (img.width(), img.height()) {
+                (Ok(w), Ok(h)) => (w.max(0) as u32, h.max(0) as u32),
+                _ => {
+                    other += 1;
+                    continue;
+                }
             };
-            let w = bmp.width().max(0) as u32;
-            let h = bmp.height().max(0) as u32;
             if w < 32 || h < 32 {
                 continue;
             }
