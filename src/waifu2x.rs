@@ -1,5 +1,6 @@
 //! 按 unlimited:waifu2x 的 tiled_render 流程跑 ONNX (本地, 不上传图片).
 
+use std::path::Path;
 use std::sync::Mutex;
 
 use image::RgbImage;
@@ -17,7 +18,8 @@ pub struct OrtEngine {
 }
 
 impl OrtEngine {
-    pub fn load(path: &std::path::Path, backend: Backend) -> Result<Self, Error> {
+    pub fn load(path: &Path, backend: Backend) -> Result<Self, Error> {
+        prepare_ort()?;
         let mut b = Session::builder().map_err(|e| Error::Infer(e.to_string()))?;
         let eps = execution_providers(backend);
         if !eps.is_empty() {
@@ -67,6 +69,43 @@ impl OrtEngine {
             w,
         })
     }
+}
+
+fn prepare_ort() -> Result<(), Error> {
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        let dylib = find_ort_dylib().ok_or(Error::OrtMissing)?;
+        ort::init_from(&dylib)
+            .map_err(|e| Error::Infer(format!("加载 ONNX Runtime: {e}")))?
+            .commit();
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn find_ort_dylib() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Ok(p) = std::env::var("ORT_DYLIB_PATH") {
+        if !p.is_empty() {
+            let pb = PathBuf::from(&p);
+            if pb.is_file() {
+                return Some(pb);
+            }
+            let joined = pb.join("libonnxruntime.dylib");
+            if joined.is_file() {
+                return Some(joined);
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let c = dir.join("libonnxruntime.dylib");
+            if c.is_file() {
+                return Some(c);
+            }
+        }
+    }
+    None
 }
 
 fn execution_providers(backend: Backend) -> Vec<ep::ExecutionProviderDispatch> {

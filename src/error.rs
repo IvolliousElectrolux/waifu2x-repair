@@ -13,6 +13,11 @@ pub enum Error {
     PdfiumMissing { lib: String },
     #[error("无法加载 pdfium ({}): {detail}", .path.display())]
     PdfiumLoad { path: PathBuf, detail: String },
+    #[error(
+        "找不到 libonnxruntime.dylib — 请把它放在程序同目录下, \
+         或设置环境变量 ORT_DYLIB_PATH 指定路径."
+    )]
+    OrtMissing,
     #[error("打开 PDF 失败: {0}")]
     PdfOpen(String),
     #[error("无法打开图片 ({}): {detail}", .path.display())]

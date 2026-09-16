@@ -41,6 +41,28 @@ jobs:
           cache-provider: github
           save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
 
+      # Microsoft 在 1.23.2 后不再提供 osx-x86_64; pykeio/ort 因此也没有该 target 的预编译.
+      - name: Cache Intel Mac ONNX Runtime
+        if: matrix.target == 'x86_64-apple-darwin'
+        id: cache-ort-x64
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ort-osx-x64
+          key: onnxruntime-osx-x86_64-1.23.2
+
+      - name: Fetch Intel Mac ONNX Runtime
+        if: matrix.target == 'x86_64-apple-darwin' && steps.cache-ort-x64.outputs.cache-hit != 'true'
+        env:
+          ORT_VER: "1.23.2"
+        run: |
+          set -euo pipefail
+          DEST="${RUNNER_TEMP}/ort-osx-x64"
+          mkdir -p "$DEST"
+          curl -fsSL -o "$DEST/ort.tgz" \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/onnxruntime-osx-x86_64-${ORT_VER}.tgz"
+          tar -xzf "$DEST/ort.tgz" -C "$DEST"
+          rm -f "$DEST/ort.tgz"
+
       - name: Build
         run: cargo build -r --target ${{ matrix.target }}
 
@@ -62,9 +84,15 @@ jobs:
           test -n "$DYLIB"
           cp "$DYLIB" "$STAGE/libpdfium.dylib"
 
-          # ort copy-dylibs 把 onnxruntime 放到 target
+          # arm64: ort copy-dylibs; x64: Microsoft 1.23.2 (最后一版官方 Intel Mac)
           find "target/${{ matrix.target }}/release" -maxdepth 1 \( -name 'libonnxruntime*.dylib' -o -name 'libonnxruntime*' \) -exec cp {} "$STAGE/" \; || true
           find "target/${{ matrix.target }}/release/deps" -maxdepth 1 -name 'libonnxruntime*.dylib' -exec cp {} "$STAGE/" \; || true
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+            ORT_DY=$(find "${RUNNER_TEMP}/ort-osx-x64" -name 'libonnxruntime.dylib' | head -n 1)
+            test -n "$ORT_DY"
+            cp -L "$ORT_DY" "$STAGE/libonnxruntime.dylib"
+            find "$(dirname "$ORT_DY")" -name 'libonnxruntime*.dylib' -exec cp -L {} "$STAGE/" \;
+          fi
 
           ditto -c -k --sequesterRsrc --keepParent "$STAGE" "${STAGE}.zip"
           echo "STAGE=$STAGE" >> "$GITHUB_ENV"

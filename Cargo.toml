@@ -21,6 +21,9 @@ uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 sysinfo = "0.33"
 rand = "0.8"
+# pykeio/ort 已无 x86_64-apple-darwin 预编译 (Microsoft 在 1.23.2 后停掉 Intel Mac).
+# Intel Mac 用 load-dynamic 加载发行包里的官方 1.23.2 dylib; 其余平台仍下载预编译.
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
 ort = { version = "2.0.0-rc.10", default-features = false, features = [
     "std",
     "ndarray",
@@ -30,6 +33,15 @@ ort = { version = "2.0.0-rc.10", default-features = false, features = [
     "directml",
     "coreml",
     "lax-feature-matching",
+] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+ort = { version = "2.0.0-rc.10", default-features = false, features = [
+    "std",
+    "ndarray",
+    "load-dynamic",
+    "tls-native",
+    "coreml",
 ] }
 
 [profile.release]
