@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+.DS_Store
+Thumbs.db
+**/.tmp*
+/vendor/
+pdfium.dll
+libpdfium.dylib
+libpdfium.so
+*.onnx
+/models/

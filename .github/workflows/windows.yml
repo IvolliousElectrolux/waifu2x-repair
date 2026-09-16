@@ -1,0 +1,79 @@
+name: Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Attach to existing release tag; empty = artifact only"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-x64
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Build
+        run: cargo build -r
+
+      - name: Bundle pdfium + onnxruntime
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          STAGE="waifu2x_repair-${VER}-windows-x64"
+          mkdir -p "$STAGE"
+          cp target/release/waifu2x_repair.exe "$STAGE/"
+          curl -fsSL -o pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F6406/pdfium-win-x64.tgz"
+          mkdir -p pdfium-extract
+          tar -xzf pdfium.tgz -C pdfium-extract
+          DLL=$(find pdfium-extract -name 'pdfium.dll' | head -n 1)
+          test -n "$DLL"
+          cp "$DLL" "$STAGE/pdfium.dll"
+          find target/release -maxdepth 1 -name 'onnxruntime*.dll' -exec cp {} "$STAGE/" \; || true
+          find target/release/deps -maxdepth 1 -name 'onnxruntime*.dll' -exec cp {} "$STAGE/" \; || true
+          7z a -tzip "${STAGE}.zip" "$STAGE"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.STAGE }}.zip
+
+      - name: Attach zip to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=""
+          if [ -n "${INPUT_TAG:-}" ]; then
+            TAG="$INPUT_TAG"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "no release tag; skip attach"
+            exit 0
+          fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --notes "waifu2x repair ${TAG}"
+          fi
+          gh release upload "$TAG" "${STAGE}.zip" --clobber
