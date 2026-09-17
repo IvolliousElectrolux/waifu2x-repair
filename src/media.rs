@@ -155,3 +155,23 @@ pub fn job_out_path(
         out_dir.join(parent).join(name)
     }
 }
+
+/// 由某一页修好的 PNG 推出合成 PDF 路径.
+pub fn assembled_pdf_path(page_png: &Path, source_pdf: &Path) -> PathBuf {
+    let parent = page_png.parent().unwrap_or_else(|| Path::new("."));
+    let stem = source_pdf
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("score");
+    let waifu = page_png
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|n| n.to_ascii_lowercase().contains("_waifu2x"))
+        .unwrap_or(false);
+    let name = if waifu {
+        format!("{stem}_waifu2x.pdf")
+    } else {
+        format!("{stem}.pdf")
+    };
+    parent.join(name)
+}

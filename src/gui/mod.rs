@@ -393,6 +393,9 @@ impl RepairApp {
                 self.chip_c = Some(celsius);
                 self.thermal_paused = paused;
             }
+            engine::Event::PdfBundle { path, pages } => {
+                self.status = format!("已合成 PDF ({} 页): {}", pages, path.display()).into();
+            }
             engine::Event::Finished { error } => {
                 self.running = false;
                 self.engine = None;
@@ -402,7 +405,13 @@ impl RepairApp {
                 self.status = if let Some(e) = error {
                     format!("未能开始: {e}").into()
                 } else if started {
-                    "完成.".into()
+                    let keep = self.status.as_ref().contains("已合成")
+                        || self.status.as_ref().contains("合成 PDF");
+                    if keep {
+                        self.status.clone()
+                    } else {
+                        "完成.".into()
+                    }
                 } else {
                     "队列没有开始处理.".into()
                 };

@@ -1,6 +1,6 @@
 //! 全异步队列: 只存路径, 一次读一页进内存, 修完释放; 失败 (含 OOM) 重新入队并收缩 tile.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, Mutex, Notify};
 
 use crate::download;
 use crate::error::Error;
+use crate::media;
 use crate::mem;
 use crate::models::{self, Backend, Scale, TileSize};
 use crate::pdf::{self, PageKind};
@@ -79,6 +80,7 @@ pub enum Event {
         requeued: bool,
     },
     Thermal { celsius: f32, paused: bool },
+    PdfBundle { path: PathBuf, pages: usize },
     Finished { error: Option<String> },
 }
 
@@ -210,6 +212,7 @@ async fn run_pipeline(
         engine.backend_label, method.method
     )));
 
+    let pdf_plan = pdf_groups(&jobs);
     let queue = Arc::new(Mutex::new(VecDeque::from_iter(jobs.into_iter().map(|job| {
         Item {
             job,
@@ -262,6 +265,16 @@ async fn run_pipeline(
 
     for h in handles {
         let _ = h.await;
+    }
+    if !stop.load(Ordering::SeqCst) && !pdf_plan.is_empty() {
+        send(Event::Status("正在合成 PDF…".into()));
+        let ev2 = ev.clone();
+        match tokio::task::spawn_blocking(move || assemble_pdfs(pdf_plan, ev2)).await {
+            Ok(Ok(n)) if n > 0 => send(Event::Status(format!("完成, 已合成 {n} 个 PDF"))),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => send(Event::Status(format!("合成 PDF 失败: {e}"))),
+            Err(e) => send(Event::Status(format!("合成 PDF 失败: {e}"))),
+        }
     }
     send(Event::Finished { error: None });
 }
@@ -499,6 +512,53 @@ fn load_skip(e: &Error) -> bool {
 
 fn is_write_err(e: &Error) -> bool {
     e.to_string().contains("写 ")
+}
+
+fn pdf_groups(jobs: &[PageJob]) -> BTreeMap<PathBuf, Vec<(u32, PathBuf)>> {
+    let mut m: BTreeMap<PathBuf, Vec<(u32, PathBuf)>> = BTreeMap::new();
+    for j in jobs {
+        if let JobSource::Pdf { path, page, .. } = &j.source {
+            m.entry(path.clone())
+                .or_default()
+                .push((*page, j.out_path.clone()));
+        }
+    }
+    for pages in m.values_mut() {
+        pages.sort_by_key(|(p, _)| *p);
+    }
+    m
+}
+
+fn assemble_pdfs(
+    plan: BTreeMap<PathBuf, Vec<(u32, PathBuf)>>,
+    ev: mpsc::UnboundedSender<Event>,
+) -> Result<usize, Error> {
+    let mut ok = 0usize;
+    let mut last_err: Option<Error> = None;
+    for (src, mut pages) in plan {
+        pages.retain(|(_, p)| p.is_file());
+        if pages.is_empty() {
+            continue;
+        }
+        let dest = media::assembled_pdf_path(&pages[0].1, &src);
+        match pdf::assemble_repaired_pdf(&src, &pages, &dest) {
+            Ok(()) => {
+                let n = pages.len();
+                let _ = ev.send(Event::PdfBundle {
+                    path: dest,
+                    pages: n,
+                });
+                ok += 1;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if ok == 0 {
+        if let Some(e) = last_err {
+            return Err(e);
+        }
+    }
+    Ok(ok)
 }
 
 fn load_rgb(job: &PageJob) -> Result<RgbImage, Error> {

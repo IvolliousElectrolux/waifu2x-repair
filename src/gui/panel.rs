@@ -271,9 +271,9 @@ impl RepairApp {
                             .text_xs()
                             .text_color(rgb(0x64748b))
                             .child(if self.settings.overwrite {
-                                "写回原目录同名 .png (jpg/tif 会在旁边生成 png, 不删原文件). PDF 写成 文件名_p001.png"
+                                "写回原目录同名文件. PDF 先逐页 png, 全部修好后再合成同名 .pdf"
                             } else {
-                                "按拖入文件夹的相对路径镜像到输出目录, 文件名加 _waifu2x"
+                                "按相对路径镜像到输出目录; PDF 会再合成一份 *_waifu2x.pdf"
                             }),
                     ),
             )
