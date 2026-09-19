@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use image::{DynamicImage, RgbImage};
+use image::RgbImage;
 use pdfium_render::prelude::*;
 
 use crate::error::Error;
@@ -400,7 +400,8 @@ pub fn materialize_page(
     }
 }
 
-/// 按原 PDF 页序把修好的 PNG 合成一份 PDF, 纸张尺寸跟源页一致.
+/// 按原 PDF 页序把修好的图合成一份 PDF, 纸张尺寸跟源页一致.
+/// 1-bit 谱面保持 DeviceGray, 彩色封面走 JPEG, 不再经 pdfium 扩成 RGBA.
 pub fn assemble_repaired_pdf(
     source_pdf: &Path,
     pages: &[(u32, PathBuf)],
@@ -409,80 +410,33 @@ pub fn assemble_repaired_pdf(
     if pages.is_empty() {
         return Err(Error::msg("没有可合成的页"));
     }
+    let sizes = read_page_sizes(source_pdf, pages)?;
+    let plan: Vec<(f32, f32, &Path)> = pages
+        .iter()
+        .zip(sizes.iter())
+        .map(|((_, png), (w, h))| (*w, *h, png.as_path()))
+        .collect();
+    crate::assemble::write_image_pdf(&plan, dest)
+}
+
+fn read_page_sizes(source_pdf: &Path, pages: &[(u32, PathBuf)]) -> Result<Vec<(f32, f32)>, Error> {
     let pdfium = bind_pdfium()?;
-    let sizes = {
-        let document = pdfium
-            .load_pdf_from_file(source_pdf, None)
-            .map_err(|e| Error::PdfOpen(e.to_string()))?;
-        let n = document.pages().len() as u32;
-        let mut sizes = Vec::with_capacity(pages.len());
-        for &(page_1based, _) in pages {
-            if page_1based == 0 || page_1based > n {
-                sizes.push((595.0, 842.0));
-                continue;
-            }
-            match document.pages().get((page_1based - 1) as u16) {
-                Ok(page) => sizes.push((
-                    page.width().value.max(1.0),
-                    page.height().value.max(1.0),
-                )),
-                Err(_) => sizes.push((595.0, 842.0)),
-            }
+    let document = pdfium
+        .load_pdf_from_file(source_pdf, None)
+        .map_err(|e| Error::PdfOpen(e.to_string()))?;
+    let n = document.pages().len() as u32;
+    let mut sizes = Vec::with_capacity(pages.len());
+    for &(page_1based, _) in pages {
+        if page_1based == 0 || page_1based > n {
+            sizes.push((595.0, 842.0));
+            continue;
         }
-        sizes
-    };
-
-    let mut document = pdfium
-        .create_new_pdf()
-        .map_err(|e| Error::msg(format!("新建 PDF: {e}")))?;
-    for ((_, png), (w_pt, h_pt)) in pages.iter().zip(sizes.iter()) {
-        let img = image::open(png).map_err(|e| Error::ImageOpen {
-            path: png.clone(),
-            detail: e.to_string(),
-        })?;
-        let img = DynamicImage::ImageRgba8(img.to_rgba8());
-        let (w_pt, h_pt) = if *w_pt >= 1.0 && *h_pt >= 1.0 {
-            (*w_pt, *h_pt)
-        } else {
-            (
-                (img.width() as f32) * 72.0 / 150.0,
-                (img.height() as f32) * 72.0 / 150.0,
-            )
-        };
-        let mut page = document
-            .pages_mut()
-            .create_page_at_end(PdfPagePaperSize::new_custom(
-                PdfPoints::new(w_pt),
-                PdfPoints::new(h_pt),
-            ))
-            .map_err(|e| Error::msg(format!("新建页: {e}")))?;
-        page.objects_mut()
-            .create_image_object(
-                PdfPoints::new(0.0),
-                PdfPoints::new(0.0),
-                &img,
-                Some(PdfPoints::new(w_pt)),
-                Some(PdfPoints::new(h_pt)),
-            )
-            .map_err(|e| Error::msg(format!("嵌入 {}: {e}", png.display())))?;
+        match document.pages().get((page_1based - 1) as u16) {
+            Ok(page) => sizes.push((page.width().value.max(1.0), page.height().value.max(1.0))),
+            Err(_) => sizes.push((595.0, 842.0)),
+        }
     }
-
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| Error::msg(e.to_string()))?;
-    }
-    let tmp = dest.with_extension("pdf.part");
-    document
-        .save_to_file(&tmp)
-        .map_err(|e| Error::msg(format!("写 {}: {e}", tmp.display())))?;
-    drop(document);
-    if dest.exists() {
-        let _ = std::fs::remove_file(dest);
-    }
-    std::fs::rename(&tmp, dest).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        Error::msg(format!("写 {}: {e}", dest.display()))
-    })?;
-    Ok(())
+    Ok(sizes)
 }
 
 pub fn register_tmp_dir(dir: PathBuf) {

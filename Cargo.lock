@@ -3492,6 +3492,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-writer"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ea27c5015ab81753fc61e49f8cde74999346605ee148bb20008ef3d3150e0dc"
+dependencies = [
+ "bitflags 2.13.2",
+ "itoa",
+ "memchr",
+ "ryu",
+]
+
+[[package]]
 name = "pdfium-render"
 version = "0.8.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5730,7 +5742,9 @@ dependencies = [
  "async-channel 2.5.0",
  "gpui",
  "image",
+ "miniz_oxide 0.8.9",
  "ort",
+ "pdf-writer",
  "pdfium-render",
  "png 0.18.1",
  "rand 0.8.8",

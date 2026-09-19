@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod assemble;
 mod binarize;
 mod config;
 mod download;

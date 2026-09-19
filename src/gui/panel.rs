@@ -228,7 +228,7 @@ impl RepairApp {
                         div()
                             .text_xs()
                             .text_color(rgb(0x64748b))
-                            .child("Otsu 阈值写成 1-bit PNG, 谱面体积会小很多"),
+                            .child("谱面写成 1-bit; 彩色封面保持彩色, 合成时用 JPEG"),
                     ),
             )
             .child(

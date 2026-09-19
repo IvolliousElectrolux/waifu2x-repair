@@ -30,7 +30,40 @@ pub fn save_binary_png(rgb: &RgbImage, path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn luma8(rgb: &RgbImage) -> Vec<u8> {
+/// 封面/照片色度方差大, 谱面 (含发黄纸) 几乎是同一色偏.
+pub fn is_colorful(rgb: &RgbImage) -> bool {
+    let n_px = rgb.width().saturating_mul(rgb.height()) as usize;
+    if n_px == 0 {
+        return false;
+    }
+    let step = (n_px / 12_000).max(1);
+    let mut n = 0i64;
+    let mut sum_cr = 0i64;
+    let mut sum_cb = 0i64;
+    let mut samples = Vec::new();
+    for px in rgb.as_raw().chunks_exact(3).step_by(step) {
+        let cr = px[0] as i32 - px[1] as i32;
+        let cb = px[1] as i32 - px[2] as i32;
+        sum_cr += cr as i64;
+        sum_cb += cb as i64;
+        samples.push((cr, cb));
+        n += 1;
+    }
+    if n == 0 {
+        return false;
+    }
+    let mcr = sum_cr / n;
+    let mcb = sum_cb / n;
+    let mut var = 0i64;
+    for (cr, cb) in samples {
+        let dcr = cr as i64 - mcr;
+        let dcb = cb as i64 - mcb;
+        var += dcr * dcr + dcb * dcb;
+    }
+    var / n > 150
+}
+
+pub(crate) fn luma8(rgb: &RgbImage) -> Vec<u8> {
     let src = rgb.as_raw();
     let mut out = Vec::with_capacity((rgb.width() * rgb.height()) as usize);
     for px in src.chunks_exact(3) {
@@ -101,6 +134,30 @@ mod tests {
         luma.extend(std::iter::repeat(200u8).take(100));
         let t = otsu(&luma);
         assert!(10 <= t && 200 > t, "thr={t} should separate 10 and 200");
+    }
+
+    #[test]
+    fn colorful_cover_vs_yellow_score() {
+        let mut cover = RgbImage::new(32, 32);
+        for (i, p) in cover.pixels_mut().enumerate() {
+            *p = image::Rgb([
+                (i % 251) as u8,
+                ((i * 9) % 251) as u8,
+                ((i * 17) % 251) as u8,
+            ]);
+        }
+        assert!(super::is_colorful(&cover));
+
+        let mut score = RgbImage::new(32, 32);
+        for (i, p) in score.pixels_mut().enumerate() {
+            let ink = i % 17 == 0;
+            *p = if ink {
+                image::Rgb([40, 32, 20])
+            } else {
+                image::Rgb([236, 228, 200])
+            };
+        }
+        assert!(!super::is_colorful(&score));
     }
 
     #[test]
