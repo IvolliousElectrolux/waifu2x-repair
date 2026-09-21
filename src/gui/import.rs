@@ -1,6 +1,5 @@
 //! PDF/图片导入弹窗, 交互对齐 score_sync.
 
-use std::collections::HashMap;
 use super::*;
 use crate::pdf::{
     clamp_pdf_scale, inspect_pdf, parse_page_selection, px_from_pt, render_pdf_page_preview,
@@ -8,6 +7,7 @@ use crate::pdf::{
 };
 use image::{Frame, ImageBuffer, RgbaImage};
 use smallvec::smallvec;
+use std::collections::HashMap;
 
 pub(super) enum ImportItem {
     Pdf {
@@ -138,9 +138,8 @@ impl PdfImportState {
         self.items.iter().any(|i| i.path() == p)
     }
     fn needs_raster(&self) -> bool {
-        self.pdfs().any(|f| {
-            f.pages.iter().any(|p| p.kind == PageKind::Raster)
-        })
+        self.pdfs()
+            .any(|f| f.pages.iter().any(|p| p.kind == PageKind::Raster))
     }
     fn mode(&self) -> Option<&PdfSizeGroup> {
         self.active
@@ -373,7 +372,8 @@ impl RepairApp {
         st.preview_gen = gen;
         st.preview_loading = true;
         cx.notify();
-        let (tx, rx) = async_channel::bounded::<Result<(PathBuf, u32, Arc<RenderImage>), String>>(1);
+        let (tx, rx) =
+            async_channel::bounded::<Result<(PathBuf, u32, Arc<RenderImage>), String>>(1);
         std::thread::spawn(move || {
             let rgb = if is_pdf {
                 render_pdf_page_preview(&path, page, PREVIEW_MAX_SIDE).map_err(|e| e.to_string())
@@ -449,20 +449,26 @@ impl RepairApp {
         };
         let mut tw = px_from_pt(mode.w_pt, scale);
         let mut th = px_from_pt(mode.h_pt, scale);
-        let mut img_scale = 0.0f32;
-        for f in st.pdfs() {
-            for g in &f.groups {
-                if let Some((iw, ih)) = g.image_px {
-                    let sx = iw as f32 / g.w_pt.max(1.0);
-                    let sy = ih as f32 / g.h_pt.max(1.0);
-                    img_scale = img_scale.max(sx.max(sy));
+        if let Some((iw, ih)) = mode.image_px {
+            scale = clamp_pdf_scale(iw as f32 / mode.w_pt.max(1.0));
+            tw = iw.clamp(1, PDF_MAX_SIDE_PX);
+            th = ih.clamp(1, PDF_MAX_SIDE_PX);
+        } else {
+            let mut img_scale = 0.0f32;
+            for f in st.pdfs() {
+                for g in &f.groups {
+                    if let Some((iw, ih)) = g.image_px {
+                        let sx = iw as f32 / g.w_pt.max(1.0);
+                        let sy = ih as f32 / g.h_pt.max(1.0);
+                        img_scale = img_scale.max(sx.max(sy));
+                    }
                 }
             }
-        }
-        if img_scale > scale {
-            scale = clamp_pdf_scale(img_scale);
-            tw = px_from_pt(mode.w_pt, scale);
-            th = px_from_pt(mode.h_pt, scale);
+            if img_scale > scale {
+                scale = clamp_pdf_scale(img_scale);
+                tw = px_from_pt(mode.w_pt, scale);
+                th = px_from_pt(mode.h_pt, scale);
+            }
         }
         st.scale = scale;
         st.target_w = tw;
@@ -543,7 +549,8 @@ impl RepairApp {
             }
             let name = crate::media::rel_display(&f.rel);
             if is_pdf_path(&f.path) {
-                let page_input = cx.new(|cx| TextInput::new(cx, "", "如 1, 3-7").with_compact(true));
+                let page_input =
+                    cx.new(|cx| TextInput::new(cx, "", "如 1, 3-7").with_compact(true));
                 st.items.push(ImportItem::PdfPending {
                     path: f.path.clone(),
                     name,
@@ -792,18 +799,15 @@ impl RepairApp {
                     }
                     let scales = st.scales_for_file(info);
                     for p in sel {
-                        let info_p = info
-                            .pages
-                            .iter()
-                            .find(|x| x.page == p)
-                            .cloned()
-                            .unwrap_or(crate::pdf::PdfPageInfo {
+                        let info_p = info.pages.iter().find(|x| x.page == p).cloned().unwrap_or(
+                            crate::pdf::PdfPageInfo {
                                 page: p,
                                 w_pt: 0.0,
                                 h_pt: 0.0,
                                 kind: PageKind::Raster,
                                 image_px: None,
-                            });
+                            },
+                        );
                         let (sx, sy) = scales
                             .get((p as usize).saturating_sub(1))
                             .copied()
@@ -896,7 +900,10 @@ impl RepairApp {
         let mode = st.mode().cloned();
         let _target_w = st.target_w;
         let _target_h = st.target_h;
-        let drag_from = st.list_drag.as_ref().and_then(|d| d.armed.then_some(d.from));
+        let drag_from = st
+            .list_drag
+            .as_ref()
+            .and_then(|d| d.armed.then_some(d.from));
         let (line_at, line_after) = match &st.list_drag {
             Some(d) if d.armed => (d.line_at, d.line_after),
             _ => (None, false),
@@ -913,10 +920,25 @@ impl RepairApp {
             .map(|(i, item)| {
                 let sub = match item {
                     ImportItem::Pdf { info, .. } => {
-                        let img = info.pages.iter().filter(|p| p.kind == PageKind::Image).count();
-                        let vec = info.pages.iter().filter(|p| p.kind == PageKind::Vector).count();
-                        let rast = info.pages.iter().filter(|p| p.kind == PageKind::Raster).count();
-                        format!("PDF · {} 页 (抽图 {img} / 光栅 {rast} / 矢量跳过 {vec})", info.page_count)
+                        let img = info
+                            .pages
+                            .iter()
+                            .filter(|p| p.kind == PageKind::Image)
+                            .count();
+                        let vec = info
+                            .pages
+                            .iter()
+                            .filter(|p| p.kind == PageKind::Vector)
+                            .count();
+                        let rast = info
+                            .pages
+                            .iter()
+                            .filter(|p| p.kind == PageKind::Raster)
+                            .count();
+                        format!(
+                            "PDF · {} 页 (抽图 {img} / 光栅 {rast} / 矢量跳过 {vec})",
+                            info.page_count
+                        )
                     }
                     ImportItem::PdfPending { .. } => "PDF · 读取中…".into(),
                     ImportItem::Image { .. } => "图片 · 原像素".into(),
@@ -967,13 +989,25 @@ impl RepairApp {
                     .px_2()
                     .py_1()
                     .rounded_sm()
-                    .bg(if is_active { rgb(0xeff6ff) } else { rgb(0xffffff) })
+                    .bg(if is_active {
+                        rgb(0xeff6ff)
+                    } else {
+                        rgb(0xffffff)
+                    })
                     .border_1()
-                    .border_color(if is_active { rgb(0x3b82f6) } else { rgb(0xe2e8f0) })
+                    .border_color(if is_active {
+                        rgb(0x3b82f6)
+                    } else {
+                        rgb(0xe2e8f0)
+                    })
                     .cursor_move()
                     .when(dragging, |d| d.opacity(0.35))
-                    .when(show_line && !line_after, |d| d.border_t_2().border_color(rgb(0xf59e0b)))
-                    .when(show_line && line_after, |d| d.border_b_2().border_color(rgb(0xf59e0b)))
+                    .when(show_line && !line_after, |d| {
+                        d.border_t_2().border_color(rgb(0xf59e0b))
+                    })
+                    .when(show_line && line_after, |d| {
+                        d.border_b_2().border_color(rgb(0xf59e0b))
+                    })
                     .child(
                         canvas(
                             {
@@ -998,12 +1032,7 @@ impl RepairApp {
                             .flex_col()
                             .flex_1()
                             .min_w(px(0.))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x0f172a))
-                                    .child(name),
-                            )
+                            .child(div().text_xs().text_color(rgb(0x0f172a)).child(name))
                             .child(
                                 div()
                                     .flex()
@@ -1012,7 +1041,11 @@ impl RepairApp {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(if pending { rgb(0xb45309) } else { rgb(0x64748b) })
+                                            .text_color(if pending {
+                                                rgb(0xb45309)
+                                            } else {
+                                                rgb(0x64748b)
+                                            })
                                             .child(sub),
                                     )
                                     .when_some(page_input, |d, inp| {
@@ -1087,20 +1120,23 @@ impl RepairApp {
                 .child(div().text_3xl().text_color(rgb(0x64748b)).child("📎"))
                 .child(div().text_sm().text_color(rgb(0x475569)).child(drop_hint));
         } else {
-            drop = drop.overflow_hidden().child(
-                div()
-                    .id("pdf_import_add_more")
-                    .w_full()
-                    .py_1()
-                    .cursor_pointer()
-                    .text_xs()
-                    .text_color(rgb(0x475569))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| this.import_dialog_pick_files(cx)),
-                    )
-                    .child(drop_hint),
-            ).child(list);
+            drop = drop
+                .overflow_hidden()
+                .child(
+                    div()
+                        .id("pdf_import_add_more")
+                        .w_full()
+                        .py_1()
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(rgb(0x475569))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| this.import_dialog_pick_files(cx)),
+                        )
+                        .child(drop_hint),
+                )
+                .child(list);
         }
 
         let mut body = div()
@@ -1142,15 +1178,33 @@ impl RepairApp {
                         .gap_2()
                         .text_xs()
                         .child("目标")
-                        .child(div().w(px(72.)).h(px(24.)).border_1().border_color(rgb(0xcbd5e1)).child(w_input))
+                        .child(
+                            div()
+                                .w(px(72.))
+                                .h(px(24.))
+                                .border_1()
+                                .border_color(rgb(0xcbd5e1))
+                                .child(w_input),
+                        )
                         .child("×")
-                        .child(div().w(px(72.)).h(px(24.)).border_1().border_color(rgb(0xcbd5e1)).child(h_input))
+                        .child(
+                            div()
+                                .w(px(72.))
+                                .h(px(24.))
+                                .border_1()
+                                .border_color(rgb(0xcbd5e1))
+                                .child(h_input),
+                        )
                         .child("px")
                         .child(
                             div()
                                 .id("pdf_lock_aspect")
                                 .cursor_pointer()
-                                .child(if lock { "☑ 锁定宽高比" } else { "☐ 锁定宽高比" })
+                                .child(if lock {
+                                    "☑ 锁定宽高比"
+                                } else {
+                                    "☐ 锁定宽高比"
+                                })
                                 .on_mouse_up(
                                     MouseButton::Left,
                                     cx.listener(|this, _, _, cx| this.toggle_pdf_lock_aspect(cx)),
@@ -1165,7 +1219,14 @@ impl RepairApp {
                         .gap_2()
                         .text_xs()
                         .child("倍率")
-                        .child(div().w(px(64.)).h(px(24.)).border_1().border_color(rgb(0xcbd5e1)).child(scale_input))
+                        .child(
+                            div()
+                                .w(px(64.))
+                                .h(px(24.))
+                                .border_1()
+                                .border_color(rgb(0xcbd5e1))
+                                .child(scale_input),
+                        )
                         .child("混排页光栅化 (纯矢量页会跳过, 整页图直接抽图)"),
                 );
             } else if has_pdf {
@@ -1227,9 +1288,7 @@ impl RepairApp {
                 };
                 let x = f32::from(ev.position.x);
                 let y = f32::from(ev.position.y);
-                if !drag.armed
-                    && (x - drag.start_x).abs() + (y - drag.start_y).abs() > 6.0
-                {
+                if !drag.armed && (x - drag.start_x).abs() + (y - drag.start_y).abs() > 6.0 {
                     drag.armed = true;
                 }
                 if drag.armed {
@@ -1268,7 +1327,12 @@ impl RepairApp {
                     .flex_col()
                     .gap_3()
                     .overflow_hidden()
-                    .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("打开文件"))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("打开文件"),
+                    )
                     .child(
                         div()
                             .flex()
@@ -1318,15 +1382,27 @@ impl RepairApp {
                             .flex_row()
                             .gap_2()
                             .justify_end()
-                            .child(self.btn("pdf_import_folder", "文件夹", false, |this, _, cx| {
-                                this.import_dialog_pick_folders(cx)
-                            }, cx))
-                            .child(self.btn("pdf_import_cancel", "取消", false, |this, _, cx| {
-                                this.close_import_dialog(cx)
-                            }, cx))
-                            .child(self.btn("pdf_import_ok", "导入", can_import, |this, _, cx| {
-                                this.confirm_pdf_import(cx)
-                            }, cx)),
+                            .child(self.btn(
+                                "pdf_import_folder",
+                                "文件夹",
+                                false,
+                                |this, _, cx| this.import_dialog_pick_folders(cx),
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "pdf_import_cancel",
+                                "取消",
+                                false,
+                                |this, _, cx| this.close_import_dialog(cx),
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "pdf_import_ok",
+                                "导入",
+                                can_import,
+                                |this, _, cx| this.confirm_pdf_import(cx),
+                                cx,
+                            )),
                     ),
             )
             .into_any_element()
