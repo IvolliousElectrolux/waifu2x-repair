@@ -63,6 +63,37 @@ pub fn is_colorful(rgb: &RgbImage) -> bool {
     var / n > 150
 }
 
+/// 彩色, 或灰度但中间调铺得很开 (照片封面). 谱面几乎只有墨和纸.
+pub fn is_photo(rgb: &RgbImage) -> bool {
+    if is_colorful(rgb) {
+        return true;
+    }
+    let n_px = rgb.width().saturating_mul(rgb.height()) as usize;
+    if n_px == 0 {
+        return false;
+    }
+    let step = (n_px / 12_000).max(1);
+    let mut hist = [0u32; 256];
+    let mut n = 0u32;
+    let mut mid = 0u32;
+    for px in rgb.as_raw().chunks_exact(3).step_by(step) {
+        let y = (77u32 * px[0] as u32 + 150 * px[1] as u32 + 29 * px[2] as u32) >> 8;
+        hist[y as usize] += 1;
+        if (40..216).contains(&y) {
+            mid += 1;
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return false;
+    }
+    if mid * 100 / n >= 12 {
+        return true;
+    }
+    let occupied = hist.iter().filter(|&&c| c.saturating_mul(500) >= n).count();
+    occupied >= 48
+}
+
 pub(crate) fn luma8(rgb: &RgbImage) -> Vec<u8> {
     let src = rgb.as_raw();
     let mut out = Vec::with_capacity((rgb.width() * rgb.height()) as usize);
@@ -158,6 +189,18 @@ mod tests {
             };
         }
         assert!(!super::is_colorful(&score));
+        assert!(!super::is_photo(&score));
+    }
+
+    #[test]
+    fn gray_photo_is_photo_but_not_colorful() {
+        let mut photo = RgbImage::new(64, 48);
+        for (i, p) in photo.pixels_mut().enumerate() {
+            let y = ((i * 17) % 251) as u8;
+            *p = image::Rgb([y, y, y]);
+        }
+        assert!(!super::is_colorful(&photo));
+        assert!(super::is_photo(&photo));
     }
 
     #[test]

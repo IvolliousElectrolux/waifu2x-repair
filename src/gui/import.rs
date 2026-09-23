@@ -2,8 +2,9 @@
 
 use super::*;
 use crate::pdf::{
-    clamp_pdf_scale, inspect_pdf, parse_page_selection, px_from_pt, render_pdf_page_preview,
-    scale_from_target, PageKind, PdfInspect, PdfSizeGroup, DEFAULT_PDF_SCALE, PDF_MAX_SIDE_PX,
+    clamp_pdf_scale, finer_than_default_scale, inspect_pdf, parse_page_selection, px_from_pt,
+    render_pdf_page_preview, scale_from_target, PageKind, PdfInspect, PdfSizeGroup,
+    DEFAULT_PDF_SCALE, PDF_MAX_SIDE_PX,
 };
 use image::{Frame, ImageBuffer, RgbaImage};
 use smallvec::smallvec;
@@ -140,6 +141,19 @@ impl PdfImportState {
     fn needs_raster(&self) -> bool {
         self.pdfs()
             .any(|f| f.pages.iter().any(|p| p.kind == PageKind::Raster))
+    }
+    /// 混排页, 或嵌入图比默认倍率更细 (600 DPI 扫描). 这两种都要让用户看到倍率.
+    fn needs_resolution(&self) -> bool {
+        if self.needs_raster() {
+            return true;
+        }
+        self.pdfs().any(|f| {
+            f.pages.iter().any(|p| {
+                p.image_px
+                    .map(|(w, h)| finer_than_default_scale(w, h, p.w_pt, p.h_pt))
+                    .unwrap_or(false)
+            })
+        })
     }
     fn mode(&self) -> Option<&PdfSizeGroup> {
         self.active
@@ -424,7 +438,7 @@ impl RepairApp {
         } else {
             st.target_h.to_string()
         };
-        let scale = if st.has_pdf() && st.needs_raster() {
+        let scale = if st.has_pdf() && st.needs_resolution() {
             trim_float(st.scale)
         } else {
             String::new()
@@ -442,37 +456,16 @@ impl RepairApp {
         let Some(mode) = st.mode().cloned() else {
             return;
         };
-        let mut scale = if st.scale < 0.5 {
+        // 不要把目标抬到嵌入图的原像素. 600 DPI 扫描会变成 5000px, 一页切出几百块.
+        let scale = if st.scale < 0.5 {
             DEFAULT_PDF_SCALE
         } else {
             st.scale
         };
-        let mut tw = px_from_pt(mode.w_pt, scale);
-        let mut th = px_from_pt(mode.h_pt, scale);
-        if let Some((iw, ih)) = mode.image_px {
-            scale = clamp_pdf_scale(iw as f32 / mode.w_pt.max(1.0));
-            tw = iw.clamp(1, PDF_MAX_SIDE_PX);
-            th = ih.clamp(1, PDF_MAX_SIDE_PX);
-        } else {
-            let mut img_scale = 0.0f32;
-            for f in st.pdfs() {
-                for g in &f.groups {
-                    if let Some((iw, ih)) = g.image_px {
-                        let sx = iw as f32 / g.w_pt.max(1.0);
-                        let sy = ih as f32 / g.h_pt.max(1.0);
-                        img_scale = img_scale.max(sx.max(sy));
-                    }
-                }
-            }
-            if img_scale > scale {
-                scale = clamp_pdf_scale(img_scale);
-                tw = px_from_pt(mode.w_pt, scale);
-                th = px_from_pt(mode.h_pt, scale);
-            }
-        }
+        let scale = clamp_pdf_scale(scale);
         st.scale = scale;
-        st.target_w = tw;
-        st.target_h = th;
+        st.target_w = px_from_pt(mode.w_pt, scale);
+        st.target_h = px_from_pt(mode.h_pt, scale);
         self.sync_pdf_import_inputs(cx);
     }
 
@@ -695,7 +688,7 @@ impl RepairApp {
         let Some(st) = self.pdf_import.as_ref() else {
             return;
         };
-        if !st.has_pdf() || !st.needs_raster() {
+        if !st.has_pdf() || !st.needs_resolution() {
             return;
         }
         let w_txt = self.pdf_w_input.read(cx).text();
@@ -889,6 +882,7 @@ impl RepairApp {
         };
         let has_pdf = st.has_pdf();
         let needs_raster = st.needs_raster();
+        let needs_resolution = st.needs_resolution();
         let n_items = st.items.len();
         let loading = st.loading || st.scanning;
         let lock = st.lock_aspect;
@@ -1156,7 +1150,7 @@ impl RepairApp {
                     .text_color(rgb(0x334155))
                     .child(format!("{n_items} 个文件 · 共 {pages} 页")),
             );
-            if needs_raster {
+            if needs_resolution {
                 body = body.child(
                     div()
                         .flex()
@@ -1227,7 +1221,11 @@ impl RepairApp {
                                 .border_color(rgb(0xcbd5e1))
                                 .child(scale_input),
                         )
-                        .child("混排页光栅化 (纯矢量页会跳过, 整页图直接抽图)"),
+                        .child(if needs_raster {
+                            "混排页按这个倍率光栅化; 比倍率更细的整页图也会缩小到这个尺寸, 纯矢量页跳过"
+                        } else {
+                            "嵌入图像素比默认倍率更细 (例如 600 DPI), 按这个尺寸缩小后再修复"
+                        }),
                 );
             } else if has_pdf {
                 body = body.child(

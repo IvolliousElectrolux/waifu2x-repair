@@ -3,10 +3,10 @@
 批量导入 PDF / 图片, 用 [unlimited:waifu2x](https://unlimited.waifu2x.net/) 同款 ONNX 在**本地**修复 (图片不会上传). 界面参数与网站一致: Backend / Model / DeNoise / Upscaling / Tile / Shuffle / TTA / Alpha. 另有 **二值化**: 修复后 Otsu 阈值写成 1-bit PNG, 用来压体积.
 
 PDF:
-- 整页嵌入图直接抽像素
+- 整页嵌入图在导入倍率盖得住时直接抽像素; 更细的 (例如 600 DPI) 按倍率光栅化
 - 混排页在导入时选分辨率再光栅化
 - 纯矢量页跳过 (无需修复)
-- 合成时纸张跟源页一致: 1-bit 谱面用 DeviceGray Flate, 彩色封面用 JPEG (不再经 pdfium 扩成 RGBA)
+- 合成时纸张跟源页一致: 1-bit 谱面用 DeviceGray Flate, 封面 (彩色或灰度照片) 用 JPEG 4:2:0
 
 失败 (含内存不足) 会重新排队, 并自动收缩并发或 tile.
 

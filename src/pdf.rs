@@ -485,6 +485,22 @@ pub fn px_from_pt(pt: f32, scale: f32) -> u32 {
     (v as u32).clamp(1, PDF_MAX_SIDE_PX)
 }
 
+/// 嵌入图像素没有明显超过目标 (允许 5% 取整误差) 时才直接抽图.
+pub fn embedded_fits_target(native_w: u32, native_h: u32, want_w: u32, want_h: u32) -> bool {
+    let lim = |n: u32, want: u32| {
+        let slack = (want / 20).max(2);
+        n <= want.saturating_add(slack)
+    };
+    lim(native_w, want_w) && lim(native_h, want_h)
+}
+
+/// 嵌入图比默认导入倍率更细, 例如 A4 上的 600 DPI.
+pub fn finer_than_default_scale(w_px: u32, h_px: u32, w_pt: f32, h_pt: f32) -> bool {
+    let sx = w_px as f32 / w_pt.max(1.0);
+    let sy = h_px as f32 / h_pt.max(1.0);
+    sx.max(sy) > DEFAULT_PDF_SCALE + 0.25
+}
+
 pub fn scale_from_target(pt: f32, px: u32) -> f32 {
     if pt < 0.5 {
         return DEFAULT_PDF_SCALE;
@@ -582,16 +598,58 @@ pub fn materialize_page(
         .map_err(|e| Error::msg(format!("读取第 {page_1based} 页失败: {e}")))?;
     match kind {
         PageKind::Vector => Err(Error::msg("矢量页无需修复")),
-        PageKind::Image => extract_largest_image(&page)
-            .or_else(|| render_visible(&page, (scale_x, scale_y)).ok())
-            .ok_or_else(|| Error::msg(format!("第 {page_1based} 页抽图失败"))),
+        PageKind::Image => materialize_image_page(&page, page_1based, scale_x, scale_y),
         PageKind::Raster => render_visible(&page, (scale_x, scale_y))
             .map_err(|e| Error::msg(format!("渲染第 {page_1based} 页失败: {e}"))),
     }
 }
 
+fn materialize_image_page(
+    page: &PdfPage<'_>,
+    page_1based: u32,
+    scale_x: f32,
+    scale_y: f32,
+) -> Result<RgbImage, Error> {
+    let (pw, ph) = content_size(page);
+    let want_w = px_from_pt(pw, scale_x);
+    let want_h = px_from_pt(ph, scale_y);
+    let fits = largest_embedded_dims(page)
+        .map(|(w, h)| embedded_fits_target(w, h, want_w, want_h))
+        .unwrap_or(false);
+    if fits {
+        if let Some(rgb) = extract_largest_image(page) {
+            return Ok(rgb);
+        }
+    }
+    // 600 DPI 一类的整页图不要按原像素展开, 否则一页会切出几百块, PNG 上百 MB.
+    render_visible(page, (scale_x, scale_y))
+        .map_err(|e| Error::msg(format!("渲染第 {page_1based} 页失败: {e}")))
+}
+
+fn largest_embedded_dims(page: &PdfPage<'_>) -> Option<(u32, u32)> {
+    let mut best: Option<(u32, u32, u32)> = None;
+    for obj in page.objects().iter() {
+        let Some(img) = obj.as_image_object() else {
+            continue;
+        };
+        let (Ok(w), Ok(h)) = (img.width(), img.height()) else {
+            continue;
+        };
+        let w = w.max(0) as u32;
+        let h = h.max(0) as u32;
+        if w < 32 || h < 32 {
+            continue;
+        }
+        let area = w.saturating_mul(h);
+        if best.as_ref().map(|(a, _, _)| area > *a).unwrap_or(true) {
+            best = Some((area, w, h));
+        }
+    }
+    best.map(|(_, w, h)| (w, h))
+}
+
 /// 按原 PDF 页序把修好的图合成一份 PDF, 纸张尺寸跟源页一致.
-/// 1-bit 谱面保持 DeviceGray, 彩色封面走 JPEG, 不再经 pdfium 扩成 RGBA.
+/// 1-bit 谱面保持 DeviceGray, 封面 (彩色或灰度照片) 走 JPEG, 不再经 pdfium 扩成 RGBA.
 pub fn assemble_repaired_pdf(
     source_pdf: &Path,
     pages: &[(u32, PathBuf)],
@@ -637,7 +695,7 @@ pub fn register_tmp_dir(dir: PathBuf) {
 
 #[cfg(test)]
 mod tests {
-    use super::{crop_px, PdfBox};
+    use super::{crop_px, embedded_fits_target, finer_than_default_scale, PdfBox};
 
     fn box_xy(l: f32, b: f32, r: f32, t: f32) -> PdfBox {
         PdfBox {
@@ -667,5 +725,72 @@ mod tests {
         assert!(y > 180 && y < 280, "top crop {y}");
         assert!(h > 4300 && h < 4600, "visible height {h}");
         assert!(y + h <= 4975);
+    }
+
+    #[test]
+    fn six_hundred_dpi_does_not_fit_default_scale() {
+        // A4, 默认 3x ≈ 1786×2526. 600 DPI 的 4961×7016 不能直接抽.
+        let want_w = super::px_from_pt(595.32, super::DEFAULT_PDF_SCALE);
+        let want_h = super::px_from_pt(841.92, super::DEFAULT_PDF_SCALE);
+        assert!(want_w < 2000 && want_h < 2800, "{want_w}x{want_h}");
+        assert!(!embedded_fits_target(4961, 7016, want_w, want_h));
+        assert!(finer_than_default_scale(4961, 7016, 595.32, 841.92));
+        // ~140 DPI 的那本可以抽原图.
+        assert!(embedded_fits_target(1180, 1572, want_w, want_h));
+        assert!(!finer_than_default_scale(1180, 1572, 596.0, 794.0));
+    }
+
+    #[test]
+    fn sample_scores_keep_sane_pixels_at_default_scale() {
+        let Ok(dir) = std::env::var("W2X_SAMPLE_DIR") else {
+            return;
+        };
+        if std::env::var_os("PDFIUM_DYNAMIC_LIB_PATH").is_none() {
+            return;
+        }
+        let small = std::path::PathBuf::from(&dir).join("九儿幻想曲.pdf");
+        let big = std::path::PathBuf::from(&dir).join("九儿.pdf");
+        if !small.is_file() || !big.is_file() {
+            return;
+        }
+        let small_info = super::inspect_pdf(&small).unwrap();
+        let scale = super::DEFAULT_PDF_SCALE;
+        let mut cover = None;
+        for p in &small_info.pages {
+            if p.kind == super::PageKind::Vector {
+                continue;
+            }
+            let img = super::materialize_page(&small, p.page, p.kind, scale, scale).unwrap();
+            let long = img.width().max(img.height());
+            assert!(
+                long < 3200,
+                "page {} is {}x{}, kind {:?}",
+                p.page,
+                img.width(),
+                img.height(),
+                p.kind
+            );
+            if p.page == 1 {
+                cover = Some(img);
+            }
+        }
+        let cover = cover.expect("cover page");
+        let png = std::env::temp_dir().join("w2x_sample_cover.png");
+        let pdf = std::env::temp_dir().join("w2x_sample_cover.pdf");
+        cover.save(&png).unwrap();
+        crate::assemble::write_image_pdf(&[(595.3, 841.9, png.as_path())], &pdf).unwrap();
+        let n = std::fs::metadata(&pdf).unwrap().len();
+        assert!(n < 1_500_000, "cover pdf {n} bytes, want about 1MB or less");
+        let _ = std::fs::remove_file(png);
+        let _ = std::fs::remove_file(pdf);
+        let big_info = super::inspect_pdf(&big).unwrap();
+        let p = &big_info.pages[0];
+        let img = super::materialize_page(&big, p.page, p.kind, scale, scale).unwrap();
+        assert!(
+            (900..1600).contains(&img.width()),
+            "140 DPI page should stay near native pixels, got {}x{}",
+            img.width(),
+            img.height()
+        );
     }
 }

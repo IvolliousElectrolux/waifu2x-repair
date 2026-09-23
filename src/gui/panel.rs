@@ -228,7 +228,7 @@ impl RepairApp {
                         div()
                             .text_xs()
                             .text_color(rgb(0x64748b))
-                            .child("谱面写成 1-bit; 彩色封面保持彩色, 合成时用 JPEG"),
+                            .child("谱面写成 1-bit; 封面 (彩色或照片) 合成进 PDF 时用 JPEG, 体积接近 Acrobat 打开 PNG"),
                     ),
             )
             .child(

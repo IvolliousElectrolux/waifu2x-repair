@@ -1,4 +1,4 @@
-//! 把修好的页合成 PDF: 1-bit 用 DeviceGray Flate, 彩色封面用 JPEG.
+//! 把修好的页合成 PDF: 1-bit 用 DeviceGray Flate, 封面 (彩色或灰度照片) 用 JPEG.
 //! 不用 pdfium SetBitmap (会扩成 RGBA + SMask, 体积和页高都会炸).
 
 use std::fs::File;
@@ -13,12 +13,18 @@ use png::{BitDepth, ColorType, Transformations};
 use crate::binarize;
 use crate::error::Error;
 
+/// q<90 时 jpeg-encoder 默认 4:2:0, 和 Acrobat 把 PNG 收成 PDF 同一档.
 const JPEG_QUALITY: u8 = 85;
 
 enum Embedded {
     Bitonal { w: u32, h: u32, data: Vec<u8> },
     Gray8 { w: u32, h: u32, data: Vec<u8> },
-    Jpeg { w: u32, h: u32, data: Vec<u8> },
+    Jpeg {
+        w: u32,
+        h: u32,
+        gray: bool,
+        data: Vec<u8>,
+    },
 }
 
 pub fn write_image_pdf(
@@ -68,12 +74,16 @@ pub fn write_image_pdf(
                 image.interpolate(false);
                 image.finish();
             }
-            Embedded::Jpeg { w, h, data } => {
+            Embedded::Jpeg { w, h, gray, data } => {
                 let mut image = pdf.image_xobject(image_id, data);
                 image.filter(Filter::DctDecode);
                 image.width(*w as i32);
                 image.height(*h as i32);
-                image.color_space().device_rgb();
+                if *gray {
+                    image.color_space().device_gray();
+                } else {
+                    image.color_space().device_rgb();
+                }
                 image.bits_per_component(8);
                 image.interpolate(true);
                 image.finish();
@@ -145,7 +155,7 @@ fn load_embedded(path: &Path) -> Result<Embedded, Error> {
             detail: e.to_string(),
         })?
         .to_rgb8();
-    if binarize::is_colorful(&rgb) {
+    if binarize::is_photo(&rgb) {
         encode_jpeg(&rgb)
     } else {
         encode_gray8(&rgb)
@@ -197,22 +207,24 @@ fn encode_gray8(rgb: &RgbImage) -> Result<Embedded, Error> {
 }
 
 fn encode_jpeg(rgb: &RgbImage) -> Result<Embedded, Error> {
+    let w = rgb.width();
+    let h = rgb.height();
+    let wu = u16::try_from(w).map_err(|_| Error::msg(format!("封面宽 {w}px 超过 JPEG 上限")))?;
+    let hu = u16::try_from(h).map_err(|_| Error::msg(format!("封面高 {h}px 超过 JPEG 上限")))?;
+    let gray = !binarize::is_colorful(rgb);
     let mut data = Vec::new();
-    let mut encoder =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut data, JPEG_QUALITY);
-    encoder
-        .encode(
-            rgb.as_raw(),
-            rgb.width(),
-            rgb.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .map_err(|e| Error::msg(format!("JPEG 编码: {e}")))?;
-    Ok(Embedded::Jpeg {
-        w: rgb.width(),
-        h: rgb.height(),
-        data,
-    })
+    let encoder = jpeg_encoder::Encoder::new(&mut data, JPEG_QUALITY);
+    if gray {
+        let luma = binarize::luma8(rgb);
+        encoder
+            .encode(&luma, wu, hu, jpeg_encoder::ColorType::Luma)
+            .map_err(|e| Error::msg(format!("JPEG 编码: {e}")))?;
+    } else {
+        encoder
+            .encode(rgb.as_raw(), wu, hu, jpeg_encoder::ColorType::Rgb)
+            .map_err(|e| Error::msg(format!("JPEG 编码: {e}")))?;
+    }
+    Ok(Embedded::Jpeg { w, h, gray, data })
 }
 
 #[cfg(test)]
@@ -311,10 +323,55 @@ mod tests {
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains("/DCTDecode"), "{s}");
         assert!(s.contains("/DeviceRGB"), "{s}");
+        assert!(!s.contains("/DeviceGray"), "{s}");
         assert!(!s.contains("/SMask"), "{s}");
         assert!(s.contains("595.3"), "{s}");
         assert!(s.contains("841.9"), "{s}");
         assert!(!s.contains("922"), "{s}");
+        let _ = std::fs::remove_file(png);
+        let _ = std::fs::remove_file(dest);
+    }
+
+    #[test]
+    fn gray_photo_becomes_gray_jpeg() {
+        let mut img = RgbImage::new(180, 240);
+        for (i, p) in img.pixels_mut().enumerate() {
+            let y = ((i * 13) % 220) as u8;
+            *p = Rgb([y, y, y]);
+        }
+        let png = tmp("gray_photo.png");
+        img.save(&png).unwrap();
+        let dest = tmp("gray_photo.pdf");
+        write_image_pdf(&[(595.3, 841.9, png.as_path())], &dest).unwrap();
+        let bytes = std::fs::read(&dest).unwrap();
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("/DCTDecode"), "{s}");
+        assert!(s.contains("/DeviceGray"), "{s}");
+        assert!(!s.contains("/DeviceRGB"), "{s}");
+        assert!(!s.contains("/BitsPerComponent 1"), "{s}");
+        let raw = (img.width() * img.height()) as usize;
+        assert!(bytes.len() < raw, "jpeg pdf {} should be under raw {raw}", bytes.len());
+        let _ = std::fs::remove_file(png);
+        let _ = std::fs::remove_file(dest);
+    }
+
+    #[test]
+    fn line_art_rgb_stays_gray_flate() {
+        let mut img = RgbImage::new(64, 48);
+        for p in img.pixels_mut() {
+            *p = Rgb([248, 244, 236]);
+        }
+        img.put_pixel(3, 3, Rgb([20, 16, 12]));
+        let png = tmp("line.png");
+        img.save(&png).unwrap();
+        let dest = tmp("line.pdf");
+        write_image_pdf(&[(595.3, 841.9, png.as_path())], &dest).unwrap();
+        let bytes = std::fs::read(&dest).unwrap();
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("/FlateDecode"), "{s}");
+        assert!(s.contains("/DeviceGray"), "{s}");
+        assert!(s.contains("/BitsPerComponent 8"), "{s}");
+        assert!(!s.contains("/DCTDecode"), "{s}");
         let _ = std::fs::remove_file(png);
         let _ = std::fs::remove_file(dest);
     }

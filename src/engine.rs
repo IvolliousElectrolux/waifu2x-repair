@@ -430,7 +430,7 @@ async fn worker(
             if let Some(parent) = out_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| Error::msg(e.to_string()))?;
             }
-            if binarize && !crate::binarize::is_colorful(&img) {
+            if binarize && !crate::binarize::is_photo(&img) {
                 crate::binarize::save_binary_png(&img, &out_path)?;
             } else {
                 img.save(&out_path)
