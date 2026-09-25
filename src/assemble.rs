@@ -1,4 +1,5 @@
-//! 把修好的页合成 PDF: 1-bit 用 DeviceGray Flate, 封面 (彩色或灰度照片) 用 JPEG.
+//! 把修好的页合成 PDF: 1-bit 用 DeviceGray Flate.
+//! 封面在 JPEG 和源 PNG 的 IDAT 里选更小的一份嵌入, 避免合成后比单张图更大.
 //! 不用 pdfium SetBitmap (会扩成 RGBA + SMask, 体积和页高都会炸).
 
 use std::fs::File;
@@ -7,6 +8,7 @@ use std::path::Path;
 
 use image::RgbImage;
 use miniz_oxide::deflate::{compress_to_vec_zlib, CompressionLevel};
+use pdf_writer::types::Predictor;
 use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref};
 use png::{BitDepth, ColorType, Transformations};
 
@@ -23,6 +25,13 @@ enum Embedded {
         w: u32,
         h: u32,
         gray: bool,
+        data: Vec<u8>,
+    },
+    /// 源 PNG 的 IDAT (zlib), PDF Predictor 15 按行还原, 体积跟单张 PNG 同一量级.
+    PngIdat {
+        w: u32,
+        h: u32,
+        colors: i32,
         data: Vec<u8>,
     },
 }
@@ -88,6 +97,26 @@ pub fn write_image_pdf(
                 image.interpolate(true);
                 image.finish();
             }
+            Embedded::PngIdat { w, h, colors, data } => {
+                let mut image = pdf.image_xobject(image_id, data);
+                image.filter(Filter::FlateDecode);
+                image
+                    .decode_parms()
+                    .predictor(Predictor::PngOptimum)
+                    .colors(*colors)
+                    .bits_per_component(8)
+                    .columns(*w as i32);
+                image.width(*w as i32);
+                image.height(*h as i32);
+                if *colors == 1 {
+                    image.color_space().device_gray();
+                } else {
+                    image.color_space().device_rgb();
+                }
+                image.bits_per_component(8);
+                image.interpolate(false);
+                image.finish();
+            }
         }
 
         let mut page = pdf.page(page_id);
@@ -137,7 +166,8 @@ fn page_size(w_pt: f32, h_pt: f32, img: &Embedded) -> (f32, f32) {
     let (w, h) = match img {
         Embedded::Bitonal { w, h, .. }
         | Embedded::Gray8 { w, h, .. }
-        | Embedded::Jpeg { w, h, .. } => (*w, *h),
+        | Embedded::Jpeg { w, h, .. }
+        | Embedded::PngIdat { w, h, .. } => (*w, *h),
     };
     (
         (w as f32) * 72.0 / 150.0,
@@ -156,10 +186,85 @@ fn load_embedded(path: &Path) -> Result<Embedded, Error> {
         })?
         .to_rgb8();
     if binarize::is_photo(&rgb) {
-        encode_jpeg(&rgb)
+        let jpeg = encode_jpeg(&rgb)?;
+        if let Some(png) = try_read_png_idat(path)? {
+            let jpeg_len = match &jpeg {
+                Embedded::Jpeg { data, .. } => data.len(),
+                _ => usize::MAX,
+            };
+            let png_len = match &png {
+                Embedded::PngIdat { data, .. } => data.len(),
+                _ => usize::MAX,
+            };
+            if png_len <= jpeg_len {
+                return Ok(png);
+            }
+        }
+        Ok(jpeg)
     } else {
         encode_gray8(&rgb)
     }
+}
+
+/// 8-bit 非隔行 RGB / 灰度 PNG 的 IDAT 可直接当 FlateDecode + Predictor 15.
+fn try_read_png_idat(path: &Path) -> Result<Option<Embedded>, Error> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(Error::ImageOpen {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            });
+        }
+    };
+    const SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 8 || &bytes[..8] != SIG {
+        return Ok(None);
+    }
+    let mut i = 8usize;
+    let mut w = 0u32;
+    let mut h = 0u32;
+    let mut depth = 0u8;
+    let mut color = 0u8;
+    let mut interlace = 1u8;
+    let mut saw_ihdr = false;
+    let mut idat = Vec::new();
+    while i + 12 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+        let typ = &bytes[i + 4..i + 8];
+        let start = i + 8;
+        let end = start.saturating_add(len);
+        if end + 4 > bytes.len() {
+            return Ok(None);
+        }
+        if typ == b"IHDR" && len >= 13 {
+            w = u32::from_be_bytes(bytes[start..start + 4].try_into().unwrap());
+            h = u32::from_be_bytes(bytes[start + 4..start + 8].try_into().unwrap());
+            depth = bytes[start + 8];
+            color = bytes[start + 9];
+            interlace = bytes[start + 12];
+            saw_ihdr = true;
+        } else if typ == b"IDAT" {
+            idat.extend_from_slice(&bytes[start..end]);
+        } else if typ == b"IEND" {
+            break;
+        }
+        i = end + 4;
+    }
+    let colors = match color {
+        0 => 1,
+        2 => 3,
+        _ => return Ok(None),
+    };
+    if !saw_ihdr || depth != 8 || interlace != 0 || w == 0 || h == 0 || idat.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Embedded::PngIdat {
+        w,
+        h,
+        colors,
+        data: idat,
+    }))
 }
 
 fn try_read_png_l1(path: &Path) -> Result<Option<Embedded>, Error> {
@@ -372,6 +477,40 @@ mod tests {
         assert!(s.contains("/DeviceGray"), "{s}");
         assert!(s.contains("/BitsPerComponent 8"), "{s}");
         assert!(!s.contains("/DCTDecode"), "{s}");
+        let _ = std::fs::remove_file(png);
+        let _ = std::fs::remove_file(dest);
+    }
+
+    #[test]
+    fn flat_cover_keeps_png_when_smaller_than_jpeg() {
+        let mut img = RgbImage::new(360, 240);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let band = (x / 40) % 6;
+            *p = match band {
+                0 => Rgb([220, 40, 40]),
+                1 => Rgb([40, 160, 60]),
+                2 => Rgb([40, 80, 200]),
+                3 => Rgb([230, 180, 40]),
+                4 => Rgb([180, 40, 160]),
+                _ => Rgb([240, 240, 235]),
+            };
+            let _ = y;
+        }
+        let png = tmp("flat_cover.png");
+        img.save(&png).unwrap();
+        let png_len = std::fs::metadata(&png).unwrap().len();
+        let dest = tmp("flat_cover.pdf");
+        write_image_pdf(&[(595.3, 841.9, png.as_path())], &dest).unwrap();
+        let bytes = std::fs::read(&dest).unwrap();
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("/Predictor 15"), "{s}");
+        assert!(s.contains("/FlateDecode"), "{s}");
+        assert!(!s.contains("/DCTDecode"), "{s}");
+        assert!(
+            bytes.len() as u64 <= png_len + 4096,
+            "pdf {} should stay near png {png_len}",
+            bytes.len()
+        );
         let _ = std::fs::remove_file(png);
         let _ = std::fs::remove_file(dest);
     }

@@ -649,7 +649,7 @@ fn largest_embedded_dims(page: &PdfPage<'_>) -> Option<(u32, u32)> {
 }
 
 /// 按原 PDF 页序把修好的图合成一份 PDF, 纸张尺寸跟源页一致.
-/// 1-bit 谱面保持 DeviceGray, 封面 (彩色或灰度照片) 走 JPEG, 不再经 pdfium 扩成 RGBA.
+/// 1-bit 谱面保持 DeviceGray; 封面在 JPEG 和源 PNG 里取更小的一份, 不再经 pdfium 扩成 RGBA.
 pub fn assemble_repaired_pdf(
     source_pdf: &Path,
     pages: &[(u32, PathBuf)],
